@@ -443,6 +443,23 @@ def register_routes(app):
         db.session.commit()
         return _respond(f"已清空处理记录（{deleted} 条）。下次运行会重新扫描所有历史邮件，已经保存过的附件可能会重复保存一份。")
 
+    @app.route("/clear_manifest", methods=["POST"])
+    def clear_manifest():
+        """清空页面底部那个可见的"处理记录"表格（ManifestEntry，已保存附件的溯源历史），
+        跟"清空处理记录"是两码事——那个清的是内部去重用的 ProcessedMessage，不影响这张表。
+        这个操作会导致对应的"下载本次结果"链接跟着失效（数据库记录没了，/download 路由查不到）。"""
+        user = current_user()
+        if not user:
+            return redirect(url_for("index"))
+
+        status = RunStatus.query.get(user.id)
+        if status and status.is_running:
+            return _respond("有任务正在运行，请先停止或等它跑完再清空附件历史。", ok=False)
+
+        deleted = ManifestEntry.query.filter_by(user_id=user.id).delete()
+        db.session.commit()
+        return _respond(f"已清空附件历史（{deleted} 条）。之前运行生成的下载链接会跟着失效，不影响下次是否重新扫描邮件。")
+
     @app.route("/run/status")
     def run_status():
         user = current_user()

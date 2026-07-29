@@ -102,11 +102,11 @@
 
         <label>附件文件名必须包含（逗号分隔，留空=不限制）</label>
         <input type="text" name="attachment_name_filter" value="{{ user.attachment_name_filter }}" placeholder="例如：invoice, statement, 发票">
-        <p class="hint" style="margin-top:4px;">按附件本身的文件名筛选，跟邮件主题是否命中关键词无关——哪怕主题里完全没有这些词，只要邮件带附件，且某个附件的文件名包含这里填的词，也会被抓下来（主题关键词这种，邮箱自带搜索就能查，不用这个工具重复做）。同一封邮件有多个附件时，只有文件名对得上的那几个会被保存，其他的会跳过。留空则不做这层限制，按上面的邮件级别筛选结果保存全部附件。</p>
+        <p class="hint" style="margin-top:4px;">按附件本身的文件名筛选，跟邮件主题是否命中关键词无关</p>
 
         <div class="checkbox-row" style="margin-top:16px;">
           <input type="checkbox" id="precise_mode" name="precise_mode" {% if user.precise_mode %}checked{% endif %}>
-          <label for="precise_mode" style="margin:0;">启用精确筛选（忽略上面的关键词/信任发件人，只用下面三项）</label>
+          <label for="precise_mode" style="margin:0;">启用精确筛选（忽略以上筛选规则）</label>
         </div>
 
         <label>精确匹配 - 邮件主题包含（逗号分隔）</label>
@@ -147,7 +147,13 @@
           清空处理记录
         </button>
       </form>
-      <p class="hint">改了筛选条件后，之前扫描过但没命中的邮件不会自动重新检查。如需重新全量扫描，点上面的"清空处理记录"。</p>
+      <form method="post" action="{{ url_for('clear_manifest') }}" id="clear-manifest-form" style="display:inline; margin-left:8px;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button class="btn btn-secondary" type="submit" id="clear-manifest-btn" {% if status and status.is_running %}disabled{% endif %}>
+          清空附件历史
+        </button>
+      </form>
+      <p class="hint">改了筛选条件后，之前扫描过但没命中的邮件不会自动重新检查。如需重新全量扫描，点"清空处理记录"。"清空附件历史"清的是下面那张可见的表格（已保存附件的溯源记录），两个按钮互不影响。</p>
 
       <div id="progress-line" style="display:none; margin-top:14px; font-size:13px; color:#333;">
         <span class="spinner">●</span>
@@ -247,6 +253,7 @@
     const runBtn = document.getElementById('run-btn');
     const stopBtn = document.getElementById('stop-btn');
     const clearBtn = document.getElementById('clear-btn');
+    const clearManifestBtn = document.getElementById('clear-manifest-btn');
     const progressLine = document.getElementById('progress-line');
     const progressChecked = document.getElementById('progress-checked');
     const progressSaved = document.getElementById('progress-saved');
@@ -269,6 +276,7 @@
             runBtn.textContent = "运行中...";
             stopBtn.classList.remove('inactive');
             clearBtn.disabled = true;
+            clearManifestBtn.disabled = true;
             progressLine.style.display = 'block';
             downloadReady.style.display = 'none';
           } else {
@@ -276,6 +284,7 @@
             runBtn.textContent = "立即运行";
             stopBtn.classList.add('inactive');
             clearBtn.disabled = false;
+            clearManifestBtn.disabled = false;
             progressLine.style.display = 'none';
             if (data.download_url) {
               downloadLink.href = data.download_url;
@@ -330,6 +339,21 @@
         e.preventDefault();
       }
     }, true); // capture 阶段先跑，拦下不想提交的情况，AJAX 提交的监听器不会执行
+
+    // "清空附件历史"清的是下面那张可见表格，表格是服务端渲染的（含分页），
+    // 这里成功后直接刷新页面重新拿数据，比在前端手写一遍删表格逻辑更可靠。
+    ajaxSubmitForm(document.getElementById('clear-manifest-form'), (data) => {
+      if (data.ok) {
+        setTimeout(() => window.location.reload(), 500);
+      }
+    });
+
+    document.getElementById('clear-manifest-form').addEventListener('submit', (e) => {
+      if (!confirm('确定要清空附件历史吗？下面表格里显示的已保存附件记录会被永久删除，之前运行生成的下载链接也会跟着失效（不影响已经下载到你电脑上的文件）。这个操作不影响下次运行是否重新扫描邮件。')) {
+        e.stopImmediatePropagation();
+        e.preventDefault();
+      }
+    }, true);
 
     ajaxSubmitForm(document.getElementById('config-form'));
   </script>
