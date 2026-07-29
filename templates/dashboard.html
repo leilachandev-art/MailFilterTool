@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <title>发票邮件筛选工具 - 控制台</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: -apple-system, "Microsoft YaHei", sans-serif; background: #f5f6f8; margin: 0; color: #222; }
+    header { background: #fff; padding: 14px 24px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 1px 4px rgba(0,0,0,0.06); }
+    header .title { font-weight: 700; }
+    header .who { font-size: 13px; color: #666; }
+    header a { color: #d6323c; text-decoration: none; font-size: 13px; }
+    .wrap { max-width: 900px; margin: 24px auto; padding: 0 16px; }
+    .card { background: #fff; border-radius: 10px; padding: 20px 24px; margin-bottom: 20px; box-shadow: 0 1px 4px rgba(0,0,0,0.06); }
+    .card h2 { font-size: 16px; margin: 0 0 14px; }
+    .status-badge { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+    .status-ok { background: #e6f4ea; color: #1e7e34; }
+    .status-off { background: #fdecea; color: #b3261e; }
+    .row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+    label { display: block; font-size: 13px; color: #444; margin: 12px 0 4px; }
+    input[type=text] { width: 100%; padding: 8px 10px; border: 1px solid #ddd; border-radius: 6px; box-sizing: border-box; font-size: 13px; }
+    .checkbox-row { display: flex; align-items: center; gap: 6px; margin: 10px 0; font-size: 13px; }
+    .btn { display: inline-block; background: #d6323c; color: #fff; padding: 9px 18px; border-radius: 6px; text-decoration: none; font-weight: 600; border: none; cursor: pointer; font-size: 13px; }
+    .btn:hover { background: #b8272f; }
+    .btn-secondary { background: #444; }
+    .btn-secondary:hover { background: #222; }
+    .hint { color: #888; font-size: 12px; margin-top: 4px; }
+    .flash { background: #fff3cd; color: #664d03; padding: 10px; border-radius: 6px; margin-bottom: 16px; font-size: 13px; }
+    #log-box { background: #111; color: #ddd; font-family: monospace; font-size: 12px; padding: 12px; border-radius: 8px; height: 220px; overflow-y: auto; white-space: pre-wrap; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid #eee; }
+    th { color: #666; font-weight: 600; }
+    a.link { color: #1a56db; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+    .spinner { display: inline-block; margin-right: 4px; color: #d6323c; animation: pulse 1s infinite; }
+    #toast {
+      position: fixed; top: 18px; left: 50%; transform: translateX(-50%) translateY(-8px);
+      background: #333; color: #fff; padding: 10px 20px; border-radius: 8px; font-size: 13px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.2); z-index: 1000; opacity: 0; pointer-events: none;
+      transition: opacity 0.2s ease, transform 0.2s ease; max-width: 80vw; text-align: center;
+    }
+    #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+    #toast.error { background: #b3261e; }
+  </style>
+</head>
+<body>
+  <div id="toast"></div>
+  <header>
+    <div class="title">发票邮件筛选工具</div>
+    <div class="who">{{ user.zoho_email }} · <a href="{{ url_for('logout') }}">退出登录</a></div>
+  </header>
+
+  <div class="wrap">
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}
+        {% for m in messages %}<div class="flash">{{ m }}</div>{% endfor %}
+      {% endif %}
+    {% endwith %}
+
+    <div class="card">
+      <h2>连接状态</h2>
+      <div class="row">
+        <span>Zoho 邮箱</span>
+        <span class="status-badge status-ok">已连接</span>
+      </div>
+      <div class="row">
+        <span>OneDrive {% if user.ms_account_name %}（{{ user.ms_account_name }}）{% endif %}</span>
+        {% if user.onedrive_connected() %}
+          <span class="status-badge status-ok">已连接</span>
+        {% else %}
+          <a class="btn" href="{{ url_for('connect_microsoft') }}">连接 OneDrive</a>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>筛选条件</h2>
+      <form method="post" action="{{ url_for('save_config') }}" id="config-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <label>关键词（逗号分隔）</label>
+        <input type="text" name="keywords" value="{{ user.keywords }}">
+
+        <label>信任发件人域名（逗号分隔，可留空）</label>
+        <input type="text" name="sender_domains" value="{{ user.sender_domains }}">
+
+        <label>信任发件人邮箱（逗号分隔，可留空）</label>
+        <input type="text" name="specific_senders" value="{{ user.specific_senders }}">
+
+        <div class="checkbox-row">
+          <input type="checkbox" id="require_attachment" name="require_attachment" {% if user.require_attachment_for_keyword_match %}checked{% endif %}>
+          <label for="require_attachment" style="margin:0;">关键词命中时要求邮件必须带附件（推荐勾选）</label>
+        </div>
+
+        <label>只扫描此日期之后（YYYY-MM-DD，留空=全部历史）</label>
+        <input type="text" name="since_date" value="{{ user.since_date }}" style="width:160px;">
+
+        <div class="checkbox-row" style="margin-top:16px;">
+          <input type="checkbox" id="precise_mode" name="precise_mode" {% if user.precise_mode %}checked{% endif %}>
+          <label for="precise_mode" style="margin:0;">启用精确筛选（忽略上面的关键词/信任发件人，只用下面三项）</label>
+        </div>
+
+        <label>精确匹配 - 邮件主题包含（逗号分隔）</label>
+        <input type="text" name="precise_subject" value="{{ user.precise_subject }}">
+
+        <label>精确匹配 - 发件人邮箱（逗号分隔）</label>
+        <input type="text" name="precise_sender" value="{{ user.precise_sender }}">
+
+        <label>精确匹配 - 附件文件名包含（逗号分隔）</label>
+        <input type="text" name="precise_attachment" value="{{ user.precise_attachment }}">
+
+        <label style="margin-top:16px;">投递方式</label>
+        <div class="checkbox-row">
+          <input type="radio" id="target_onedrive" name="sync_target" value="onedrive" onclick="return blockOnedrive(event)">
+          <label for="target_onedrive" style="margin:0; color:#999;">上传到 OneDrive（调试中，暂未开放）</label>
+        </div>
+        <div class="checkbox-row">
+          <input type="radio" id="target_download" name="sync_target" value="download" {% if user.sync_target != 'local' %}checked{% endif %} onchange="toggleTarget()">
+          <label for="target_download" style="margin:0;">打包下载 ZIP（推荐，网站部署在哪都能用，不用装任何东西）</label>
+        </div>
+        <div class="checkbox-row">
+          <input type="radio" id="target_local" name="sync_target" value="local" {% if user.sync_target == 'local' %}checked{% endif %} onchange="toggleTarget()">
+          <label for="target_local" style="margin:0;">保存到服务器本地路径（进阶用法，适合自己在本机跑这个网站）</label>
+        </div>
+
+        <div id="onedrive-fields" style="display:none;">
+          <label>OneDrive 目标文件夹</label>
+          <input type="text" name="onedrive_folder" value="{{ user.onedrive_folder }}">
+        </div>
+
+        <div id="download-fields" style="display:{% if user.sync_target != 'local' %}block{% else %}none{% endif %}; margin-top:8px;">
+          <p class="hint">运行完成后，页面上会出现"下载本次结果"按钮，点一下就会把这次命中的附件打包成 ZIP，通过浏览器正常下载流程存到你自己电脑（一般是"下载"文件夹），跟网站部署在哪台服务器上没关系。</p>
+        </div>
+
+        <div id="local-fields" style="display:{% if user.sync_target == 'local' %}block{% else %}none{% endif %};">
+          <label>本地保存路径（填运行这个网站的那台电脑上的磁盘路径，例如 E:\logistic\InvoiceResult）</label>
+          <div style="display:flex; gap:8px;">
+            <input type="text" name="local_folder" id="local_folder_input" value="{{ user.local_folder }}" placeholder="E:\logistic\InvoiceResult" style="flex:1;">
+            <button type="button" class="btn btn-secondary" id="browse-btn" style="white-space:nowrap;">浏览...</button>
+          </div>
+
+          <div id="folder-browser" style="display:none; border:1px solid #ddd; border-radius:6px; padding:10px; margin-top:8px; background:#fafafa;">
+            <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+              <button type="button" class="btn btn-secondary" id="fb-up-btn" style="padding:4px 10px; font-size:12px;">上一级</button>
+              <span id="fb-current-path" style="font-size:12px; color:#555; word-break:break-all;"></span>
+            </div>
+            <div id="fb-list" style="max-height:200px; overflow-y:auto; font-size:13px; border:1px solid #eee; border-radius:4px; background:#fff;"></div>
+            <div style="margin-top:8px; display:flex; gap:8px;">
+              <button type="button" class="btn" id="fb-select-btn" style="padding:5px 14px; font-size:12px;">选择当前文件夹</button>
+              <button type="button" class="btn btn-secondary" id="fb-cancel-btn" style="padding:5px 14px; font-size:12px;">取消</button>
+            </div>
+          </div>
+
+          <p class="hint">注意：这里的"本地"是指运行这个网站的那台电脑的磁盘，不是访问网站那个人的电脑。网站集中部署给大家用的时候不建议选这个（写的是服务器磁盘），只适合自己在本机跑着测试用。</p>
+        </div>
+
+        <div style="margin-top: 18px;">
+          <button class="btn" type="submit">保存配置</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>运行</h2>
+      <form method="post" action="{{ url_for('run_now') }}" id="run-form" style="display:inline;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button class="btn" type="submit" id="run-btn" {% if status and status.is_running %}disabled{% endif %}>
+          {% if status and status.is_running %}运行中...{% else %}立即运行{% endif %}
+        </button>
+      </form>
+      <form method="post" action="{{ url_for('stop_run') }}" id="stop-form" style="display:inline; margin-left:8px;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button class="btn btn-secondary" type="submit" id="stop-btn" {% if not (status and status.is_running) %}disabled{% endif %}>
+          停止运行
+        </button>
+      </form>
+      <form method="post" action="{{ url_for('clear_processed') }}" id="clear-form" style="display:inline; margin-left:8px;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button class="btn btn-secondary" type="submit" id="clear-btn" {% if status and status.is_running %}disabled{% endif %}>
+          清空处理记录
+        </button>
+      </form>
+      <p class="hint">改了筛选条件后，之前扫描过但没命中的邮件不会自动重新检查。如需重新全量扫描，点上面的"清空处理记录"。</p>
+
+      <div id="progress-line" style="display:none; margin-top:14px; font-size:13px; color:#333;">
+        <span class="spinner">●</span>
+        已检查 <b id="progress-checked">0</b> 封邮件，已保存 <b id="progress-saved">0</b> 个附件
+      </div>
+      <div id="download-ready" style="display:none; margin-top:12px;">
+        <a class="btn" id="download-link" href="#">下载本次结果（ZIP）</a>
+      </div>
+      <div id="log-box" style="margin-top:12px;">（日志会在运行时显示在这里）</div>
+    </div>
+
+    <div class="card">
+      <h2>处理记录 {% if total_emails %}<span style="font-weight:400; color:#888; font-size:13px;">（共 {{ total_emails }} 封邮件命中）</span>{% endif %}</h2>
+      <table>
+        <thead>
+          <tr><th>时间</th><th>发件人</th><th>主题</th><th>附件</th></tr>
+        </thead>
+        <tbody>
+          {% for e in entries %}
+          <tr>
+            <td style="white-space:nowrap;">{{ e.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+            <td>{{ e.sender }}</td>
+            <td>{{ e.subject }}</td>
+            <td>
+              {% for a in e.attachments %}
+                <div style="margin-bottom:{% if not loop.last %}4px{% else %}0{% endif %};">
+                  {% if a.onedrive_link and a.onedrive_link.startswith('http') %}
+                    <a class="link" href="{{ a.onedrive_link }}" target="_blank">{{ a.original_filename }}</a>
+                  {% elif a.onedrive_link and a.onedrive_link != a.original_filename %}
+                    {{ a.original_filename }} <span style="color:#999;">({{ a.onedrive_link }})</span>
+                  {% else %}
+                    {{ a.original_filename }}
+                    {% if a.run_id %}
+                      <a class="link" href="{{ url_for('download_run', run_id=a.run_id) }}" style="font-size:12px;">（下载所属批次 ZIP）</a>
+                    {% endif %}
+                  {% endif %}
+                </div>
+              {% endfor %}
+            </td>
+          </tr>
+          {% else %}
+          <tr><td colspan="4" style="color:#999;">还没有记录</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+
+      {% if total_pages and total_pages > 1 %}
+      <div style="display:flex; align-items:center; justify-content:center; gap:12px; margin-top:16px;">
+        {% if page > 1 %}
+          <a class="btn btn-secondary" style="padding:6px 14px;" href="{{ url_for('dashboard', page=page-1) }}">上一页</a>
+        {% else %}
+          <span class="btn btn-secondary" style="padding:6px 14px; opacity:0.4; cursor:default;">上一页</span>
+        {% endif %}
+        <span style="font-size:13px; color:#666;">第 {{ page }} / {{ total_pages }} 页</span>
+        {% if page < total_pages %}
+          <a class="btn btn-secondary" style="padding:6px 14px;" href="{{ url_for('dashboard', page=page+1) }}">下一页</a>
+        {% else %}
+          <span class="btn btn-secondary" style="padding:6px 14px; opacity:0.4; cursor:default;">下一页</span>
+        {% endif %}
+      </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <script>
+    function toggleTarget() {
+      const isLocal = document.getElementById('target_local').checked;
+      document.getElementById('onedrive-fields').style.display = 'none';
+      document.getElementById('local-fields').style.display = isLocal ? 'block' : 'none';
+      document.getElementById('download-fields').style.display = isLocal ? 'none' : 'block';
+    }
+
+    // OneDrive 那条链路还在调试中，先不让选，点了给个提示，仍然停在"打包下载 ZIP"。
+    function blockOnedrive(event) {
+      event.preventDefault();
+      alert('OneDrive 同步功能还在调试中，暂未开放，先用"打包下载 ZIP"吧。');
+      document.getElementById('target_download').checked = true;
+      toggleTarget();
+      return false;
+    }
+
+    // ---- 本地文件夹浏览面板（纯 HTTP，不依赖任何 GUI 库） ----
+    let fbCurrentPath = "";
+    let fbParentPath = "";
+
+    function fbLoad(path) {
+      fetch("{{ url_for('list_dirs') }}?path=" + encodeURIComponent(path))
+        .then(r => r.json())
+        .then(data => {
+          if (data.error) {
+            if (path !== "") {
+              fbLoad("");  // 目标路径打不开，回退到磁盘列表
+            } else {
+              alert(data.error);
+            }
+            return;
+          }
+          fbCurrentPath = data.path;
+          fbParentPath = data.parent;
+          document.getElementById('fb-current-path').textContent = fbCurrentPath || "（选择磁盘）";
+          document.getElementById('fb-up-btn').disabled = (fbParentPath === null);
+          const listEl = document.getElementById('fb-list');
+          listEl.innerHTML = "";
+          if (!data.dirs.length) {
+            listEl.innerHTML = '<div style="padding:8px; color:#999;">（没有子文件夹）</div>';
+          }
+          data.dirs.forEach(name => {
+            const item = document.createElement('div');
+            item.textContent = "📁 " + name;
+            item.style.padding = "6px 8px";
+            item.style.cursor = "pointer";
+            item.addEventListener('mouseenter', () => item.style.background = "#eee");
+            item.addEventListener('mouseleave', () => item.style.background = "transparent");
+            item.addEventListener('click', () => {
+              if (!fbCurrentPath) {
+                fbLoad(name);  // 在磁盘列表里，name 本身就是完整盘符路径
+              } else {
+                const sep = fbCurrentPath.endsWith('\\') || fbCurrentPath.endsWith('/') ? '' : '\\';
+                fbLoad(fbCurrentPath + sep + name);
+              }
+            });
+            listEl.appendChild(item);
+          });
+        })
+        .catch(err => alert('加载文件夹失败：' + err));
+    }
+
+    const browseBtn = document.getElementById('browse-btn');
+    if (browseBtn) {
+      browseBtn.addEventListener('click', () => {
+        const panel = document.getElementById('folder-browser');
+        const willShow = panel.style.display === 'none';
+        panel.style.display = willShow ? 'block' : 'none';
+        if (willShow) {
+          fbLoad(document.getElementById('local_folder_input').value.trim());
+        }
+      });
+      document.getElementById('fb-up-btn').addEventListener('click', () => {
+        if (fbParentPath !== null) fbLoad(fbParentPath);
+      });
+      document.getElementById('fb-select-btn').addEventListener('click', () => {
+        if (fbCurrentPath) {
+          document.getElementById('local_folder_input').value = fbCurrentPath;
+        }
+        document.getElementById('folder-browser').style.display = 'none';
+      });
+      document.getElementById('fb-cancel-btn').addEventListener('click', () => {
+        document.getElementById('folder-browser').style.display = 'none';
+      });
+    }
+
+    // ---- 小 toast 提示，代替整页刷新后在顶部展示的 flash 消息 ----
+    let toastTimer = null;
+    function showToast(message, ok = true) {
+      const toast = document.getElementById('toast');
+      toast.textContent = message;
+      toast.classList.toggle('error', !ok);
+      toast.classList.add('show');
+      if (toastTimer) clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => toast.classList.remove('show'), 3200);
+    }
+
+    // 运行/停止/清空记录/保存配置这几个表单都改成 AJAX 提交，不再整页刷新跳回顶部。
+    function ajaxSubmitForm(form, onDone) {
+      form.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const fd = new FormData(form);
+        fetch(form.action, {
+          method: 'POST',
+          headers: { 'X-Requested-With': 'XMLHttpRequest' },
+          body: fd,
+        })
+          .then(r => r.json())
+          .then(data => {
+            showToast(data.message, data.ok);
+            if (onDone) onDone(data);
+          })
+          .catch(err => showToast('请求失败：' + err, false));
+      });
+    }
+
+    const logBox = document.getElementById('log-box');
+    const runBtn = document.getElementById('run-btn');
+    const stopBtn = document.getElementById('stop-btn');
+    const clearBtn = document.getElementById('clear-btn');
+    const progressLine = document.getElementById('progress-line');
+    const progressChecked = document.getElementById('progress-checked');
+    const progressSaved = document.getElementById('progress-saved');
+    const downloadReady = document.getElementById('download-ready');
+    const downloadLink = document.getElementById('download-link');
+    let polling = null;
+
+    function poll() {
+      fetch("{{ url_for('run_status') }}")
+        .then(r => r.json())
+        .then(data => {
+          if (data.logs && data.logs.length) {
+            logBox.textContent = data.logs.join("\n");
+            logBox.scrollTop = logBox.scrollHeight;
+          }
+          progressChecked.textContent = data.checked || 0;
+          progressSaved.textContent = data.saved || 0;
+          if (data.is_running) {
+            runBtn.disabled = true;
+            runBtn.textContent = "运行中...";
+            stopBtn.disabled = false;
+            clearBtn.disabled = true;
+            progressLine.style.display = 'block';
+            downloadReady.style.display = 'none';
+          } else {
+            runBtn.disabled = false;
+            runBtn.textContent = "立即运行";
+            stopBtn.disabled = true;
+            clearBtn.disabled = false;
+            progressLine.style.display = 'none';
+            if (data.download_url) {
+              downloadLink.href = data.download_url;
+              downloadReady.style.display = 'block';
+            } else {
+              downloadReady.style.display = 'none';
+            }
+            if (polling) {
+              clearInterval(polling);
+              polling = null;
+            }
+          }
+        });
+    }
+
+    // 页面打开时先跑一次 poll() 把日志/进度/下载链接这些状态摆对（万一上次运行是在别的页面/别的时间跑完的），
+    // 如果还在跑再另外起一个轮询定时器。
+    poll();
+    fetch("{{ url_for('run_status') }}").then(r => r.json()).then(data => {
+      if (data.is_running && !polling) {
+        polling = setInterval(poll, 2000);
+      }
+    });
+
+    ajaxSubmitForm(document.getElementById('run-form'), (data) => {
+      if (data.ok && !polling) {
+        polling = setInterval(poll, 2000);
+      }
+      poll();
+    });
+
+    ajaxSubmitForm(document.getElementById('stop-form'), () => {
+      stopBtn.disabled = true;
+      if (!polling) polling = setInterval(poll, 2000);
+      poll();
+    });
+
+    ajaxSubmitForm(document.getElementById('clear-form'));
+
+    document.getElementById('clear-form').addEventListener('submit', (e) => {
+      if (!confirm('确定要清空处理记录吗？清空后下次运行会重新扫描所有历史邮件，之前已经保存过的附件可能会重复保存一份。')) {
+        e.stopImmediatePropagation();
+        e.preventDefault();
+      }
+    }, true); // capture 阶段先跑，拦下不想提交的情况，AJAX 提交的监听器不会执行
+
+    ajaxSubmitForm(document.getElementById('config-form'));
+  </script>
+</body>
+</html>

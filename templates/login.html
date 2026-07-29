@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <title>发票邮件筛选工具</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: -apple-system, "Microsoft YaHei", sans-serif; background: #f5f6f8; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+    .card { background: #fff; padding: 40px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); text-align: center; width: 360px; }
+    h1 { font-size: 20px; margin-bottom: 8px; }
+    p { color: #666; font-size: 14px; margin-bottom: 24px; }
+    a.btn { display: inline-block; background: #d6323c; color: #fff; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: 600; }
+    a.btn:hover { background: #b8272f; }
+    .flash { background: #fff3cd; color: #664d03; padding: 10px; border-radius: 6px; margin-bottom: 16px; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>发票邮件筛选工具</h1>
+    <p>用你的 Zoho 邮箱登录一次，之后筛选出来的发票附件会自动同步到你的 OneDrive。</p>
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}
+        {% for m in messages %}
+          <div class="flash">{{ m }}</div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+    <a class="btn" href="{{ url_for('login_zoho') }}">用 Zoho 登录</a>
+  </div>
+</body>
+</html>
