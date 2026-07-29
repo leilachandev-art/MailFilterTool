@@ -9,7 +9,7 @@
     header { background: #fff; padding: 14px 24px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 1px 4px rgba(0,0,0,0.06); }
     header .title { font-weight: 700; }
     header .who { font-size: 13px; color: #666; }
-    header a { color: #d6323c; text-decoration: none; font-size: 13px; }
+    header a { color: #3281d6; text-decoration: none; font-size: 13px; }
     .wrap { max-width: 900px; margin: 24px auto; padding: 0 16px; }
     .card { background: #fff; border-radius: 10px; padding: 20px 24px; margin-bottom: 20px; box-shadow: 0 1px 4px rgba(0,0,0,0.06); }
     .card h2 { font-size: 16px; margin: 0 0 14px; }
@@ -20,12 +20,12 @@
     label { display: block; font-size: 13px; color: #444; margin: 12px 0 4px; }
     input[type=text] { width: 100%; padding: 8px 10px; border: 1px solid #ddd; border-radius: 6px; box-sizing: border-box; font-size: 13px; }
     .checkbox-row { display: flex; align-items: center; gap: 6px; margin: 10px 0; font-size: 13px; }
-    .btn { display: inline-block; background: #d6323c; color: #fff; padding: 9px 18px; border-radius: 6px; text-decoration: none; font-weight: 600; border: none; cursor: pointer; font-size: 13px; }
-    .btn:hover { background: #b8272f; }
+    .btn { display: inline-block; background: #3281d6; color: #fff; padding: 9px 18px; border-radius: 6px; text-decoration: none; font-weight: 600; border: none; cursor: pointer; font-size: 13px; }
+    .btn:hover { background: #6babf1; }
     .btn-secondary { background: #444; }
     .btn-secondary:hover { background: #222; }
     .btn:disabled { opacity: 0.4; cursor: not-allowed; }
-    .btn:disabled:hover { background: #d6323c; }
+    .btn:disabled:hover { background: #3281d6; }
     .btn-secondary:disabled:hover { background: #444; }
     /* 停止按钮不用 disabled 属性(那样点击不会有任何反馈)，改用这个类只做视觉变灰，
        点击时仍然会提交，由后端告诉用户"当前没有正在运行的任务"。 */
@@ -38,7 +38,7 @@
     th { color: #666; font-weight: 600; }
     a.link { color: #1a56db; }
     @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
-    .spinner { display: inline-block; margin-right: 4px; color: #d6323c; animation: pulse 1s infinite; }
+    .spinner { display: inline-block; margin-right: 4px; color: #3281d6; animation: pulse 1s infinite; }
     #toast {
       position: fixed; top: 18px; left: 50%; transform: translateX(-50%) translateY(-8px);
       background: #333; color: #fff; padding: 10px 20px; border-radius: 8px; font-size: 13px;
@@ -84,60 +84,52 @@
       <form method="post" action="{{ url_for('save_config') }}" id="config-form">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 
-        <div style="background:#f8f9fb; border:1px solid #eee; border-radius:8px; padding:14px 16px 6px;">
-          <div style="font-weight:700; font-size:13px; margin-bottom:6px;">按附件文件名筛选（最常用，填这个就够了）</div>
-          <label>附件文件名必须包含（逗号分隔）</label>
-          <input type="text" name="attachment_name_filter" value="{{ user.attachment_name_filter }}" placeholder="例如：invoice, statement, 发票">
-          <p class="hint" style="margin-top:4px; margin-bottom:14px;">只填这一项就够用：程序会检查<b>每一封带附件的邮件</b>（不看主题、不限发件人），只要某个附件的文件名对得上这里的词，就会被保存下来；同一封邮件有多个附件时，只有名字对得上的会被保存，其他的跳过。下面"按发件人/关键词筛选"是额外的可选项，用来先缩小要检查的邮件范围（比如只看某几个人发的），不填就不做这层限制。</p>
-        </div>
+        <label title="邮件带附件、且附件文件名含这些词就会保存，不看主题/发件人。留空则按下面的筛选结果保存全部附件。">附件文件名包含</label>
+        <input type="text" name="attachment_name_filter" value="{{ user.attachment_name_filter }}" placeholder="invoice, statement, 发票" title="邮件带附件、且附件文件名含这些词就会保存，不看主题/发件人。留空则按下面的筛选结果保存全部附件。">
 
         <details style="margin-top:14px;" {% if user.keywords or user.sender_domains or user.specific_senders or user.since_date %}open{% endif %}>
-          <summary style="cursor:pointer; font-size:13px; color:#666; font-weight:700;">可选：按发件人 / 关键词先缩小范围（不填就检查所有邮件）</summary>
-          <div style="margin-top:10px; padding-left:2px; background:#f8f9fb; border:1px solid #eee; border-radius:8px; padding:14px 16px 6px;">
-            <p class="hint" style="margin:0 0 8px;">下面几项，邮件只要满足其中<b>任意一个</b>就算命中（不需要同时满足）。全部留空 = 不做这层限制，只靠上面的附件文件名筛选。</p>
-
-            <label>关键词（主题/正文包含，逗号分隔，可留空）</label>
-            <input type="text" name="keywords" value="{{ user.keywords }}">
+          <summary style="cursor:pointer; font-size:13px; color:#666; font-weight:700;">按发件人 / 关键词缩小范围（可选，满足任一项即可）</summary>
+          <div style="margin-top:10px;">
+            <label>关键词</label>
+            <input type="text" name="keywords" value="{{ user.keywords }}" placeholder="发票, invoice, bill" title="主题或正文包含即可，逗号分隔">
 
             <div class="checkbox-row">
               <input type="checkbox" id="require_attachment" name="require_attachment" {% if user.require_attachment_for_keyword_match %}checked{% endif %}>
-              <label for="require_attachment" style="margin:0;">关键词命中时要求邮件必须带附件（推荐勾选）</label>
+              <label for="require_attachment" style="margin:0;">关键词命中需带附件</label>
             </div>
 
-            <label>信任发件人域名（逗号分隔，可留空）</label>
-            <input type="text" name="sender_domains" value="{{ user.sender_domains }}">
+            <label>信任发件人域名</label>
+            <input type="text" name="sender_domains" value="{{ user.sender_domains }}" placeholder="vendor.com">
 
-            <label>信任发件人邮箱（逗号分隔，可留空 —— 批量筛选特定发件人就填这里）</label>
-            <input type="text" name="specific_senders" value="{{ user.specific_senders }}">
+            <label>信任发件人邮箱</label>
+            <input type="text" name="specific_senders" value="{{ user.specific_senders }}" placeholder="ap@vendor.com">
 
-            <label>只扫描此日期之后（YYYY-MM-DD，留空=全部历史）</label>
-            <input type="text" name="since_date" value="{{ user.since_date }}" style="width:160px; margin-bottom:14px;">
+            <label>只扫描此日期之后</label>
+            <input type="text" name="since_date" value="{{ user.since_date }}" placeholder="YYYY-MM-DD" style="width:160px; margin-bottom:14px;">
           </div>
         </details>
 
-        <details style="margin-top:14px;" {% if user.precise_mode %}open{% endif %}>
-          <summary style="cursor:pointer; font-size:13px; color:#666; font-weight:700;">进阶：更严格的邮件筛选（要求主题和发件人必须同时匹配，一般不需要）{% if user.precise_mode %} <span style="color:#d6323c;">（当前已启用）</span>{% endif %}</summary>
-          <div style="margin-top:10px; padding-left:2px;">
+        <details style="margin-top:10px;" {% if user.precise_mode %}open{% endif %}>
+          <summary style="cursor:pointer; font-size:13px; color:#666; font-weight:700;">进阶：主题+发件人须同时匹配{% if user.precise_mode %} <span style="color:#3281d6;">（已启用）</span>{% endif %}</summary>
+          <div style="margin-top:10px;" title="会替换掉上面「按发件人/关键词」的规则，改成要求主题和发件人必须同时匹配。一般不需要。">
             <div class="checkbox-row">
               <input type="checkbox" id="precise_mode" name="precise_mode" {% if user.precise_mode %}checked{% endif %}>
-              <label for="precise_mode" style="margin:0;">启用（会替换掉上面"按发件人/关键词筛选"的规则，改成要求主题和发件人必须<b>同时</b>匹配）</label>
+              <label for="precise_mode" style="margin:0;">启用</label>
             </div>
 
-            <label>精确匹配 - 邮件主题包含（逗号分隔）</label>
+            <label>主题包含</label>
             <input type="text" name="precise_subject" value="{{ user.precise_subject }}">
 
-            <label>精确匹配 - 发件人邮箱（逗号分隔）</label>
+            <label>发件人邮箱</label>
             <input type="text" name="precise_sender" value="{{ user.precise_sender }}">
 
-            <label>精确匹配 - 附件文件名包含（逗号分隔）</label>
+            <label>附件文件名包含</label>
             <input type="text" name="precise_attachment" value="{{ user.precise_attachment }}">
-
-            <p class="hint">只有真的需要"主题必须含 X，而且发件人必须是 Y"这种双重限制时才勾这个。像"按发件人批量筛选 + 按附件名筛选"这种需求，不用勾这个，用上面"按附件文件名筛选"+"按发件人/关键词筛选"就够了。</p>
           </div>
         </details>
 
         <label style="margin-top:18px;">投递方式</label>
-        <p class="hint" style="margin-top:0;">运行完成后，页面上会出现"下载本次结果"按钮，点一下就会把这次命中的附件打包成 ZIP，通过浏览器正常下载流程存到你自己电脑（一般是"下载"文件夹），跟网站部署在哪台服务器上没关系。（OneDrive 直传还在调试中，暂未开放。）</p>
+        <div style="font-size:13px; color:#444; padding:4px 0;">打包下载 ZIP</div>
 
         <div style="margin-top: 18px;">
           <button class="btn" type="submit">保存配置</button>
