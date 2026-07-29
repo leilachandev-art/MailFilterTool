@@ -52,6 +52,10 @@ class User(db.Model):
 
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
+    # ---- 访问统计：谁在用这个网站，用来在 /admin/users 里查 ----
+    last_login_at = db.Column(db.DateTime, nullable=True)
+    login_count = db.Column(db.Integer, default=0)
+
     def onedrive_connected(self):
         return bool(self.ms_refresh_token)
 

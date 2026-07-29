@@ -266,6 +266,8 @@ def register_routes(app):
         user.zoho_accounts_server = accounts_server
         user.zoho_api_domain = api_domain
         user.zoho_account_id = account_id
+        user.last_login_at = datetime.utcnow()
+        user.login_count = (user.login_count or 0) + 1
         db.session.commit()
 
         session["user_id"] = user.id
@@ -346,6 +348,36 @@ def register_routes(app):
             page=page,
             total_pages=total_pages,
             total_emails=total_emails,
+        )
+
+    @app.route("/admin/users")
+    def admin_users():
+        """查有多少人在用这个网站：每个 Zoho 登录过的账号，首次/最近登录时间、登录次数、
+        保存过多少个附件。只有管理员（第一个登录的人，或者 ADMIN_EMAILS 里指定的邮箱）能看，
+        因为这里面有其他同事的邮箱地址，不能对所有登录用户公开。"""
+        user = current_user()
+        if not user:
+            return redirect(url_for("index"))
+        if not is_admin_user(user):
+            flash("这个页面只有管理员能看。")
+            return redirect(url_for("dashboard"))
+
+        rows = (
+            db.session.query(
+                User,
+                func.count(ManifestEntry.id).label("saved_count"),
+            )
+            .outerjoin(ManifestEntry, ManifestEntry.user_id == User.id)
+            .group_by(User.id)
+            .order_by(User.created_at.asc())
+            .all()
+        )
+
+        return render_template(
+            "admin_users.html",
+            user=user,
+            rows=rows,
+            total_users=len(rows),
         )
 
     @app.route("/manifest")

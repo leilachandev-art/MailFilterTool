@@ -53,7 +53,7 @@
   <div id="toast"></div>
   <header>
     <div class="title">发票邮件筛选工具</div>
-    <div class="who">{{ user.zoho_email }} · <a href="{{ url_for('logout') }}">退出登录</a></div>
+    <div class="who">{{ user.zoho_email }} · {% if is_admin %}<a href="{{ url_for('admin_users') }}">用户统计</a> · {% endif %}<a href="{{ url_for('logout') }}">退出登录</a></div>
   </header>
 
   <div class="wrap">
