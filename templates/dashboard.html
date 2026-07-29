@@ -85,41 +85,42 @@
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 
         <div style="background:#f8f9fb; border:1px solid #eee; border-radius:8px; padding:14px 16px 6px;">
-          <div style="font-weight:700; font-size:13px; margin-bottom:6px;">第一步：筛选邮件 —— 决定要看哪些邮件</div>
-          <p class="hint" style="margin:0 0 8px;">下面几项，邮件只要满足其中<b>任意一个</b>就算命中（不需要同时满足）。<br>
-          举例：想批量筛选某些特定邮箱发来的所有邮件？只填"信任发件人邮箱"，"关键词"留空就行，不需要主题也含关键词。</p>
-
-          <label>关键词（主题/正文包含，逗号分隔，可留空）</label>
-          <input type="text" name="keywords" value="{{ user.keywords }}">
-
-          <div class="checkbox-row">
-            <input type="checkbox" id="require_attachment" name="require_attachment" {% if user.require_attachment_for_keyword_match %}checked{% endif %}>
-            <label for="require_attachment" style="margin:0;">关键词命中时要求邮件必须带附件（推荐勾选）</label>
-          </div>
-
-          <label>信任发件人域名（逗号分隔，可留空）</label>
-          <input type="text" name="sender_domains" value="{{ user.sender_domains }}">
-
-          <label>信任发件人邮箱（逗号分隔，可留空 —— 批量筛选特定发件人就填这里）</label>
-          <input type="text" name="specific_senders" value="{{ user.specific_senders }}">
-
-          <label>只扫描此日期之后（YYYY-MM-DD，留空=全部历史）</label>
-          <input type="text" name="since_date" value="{{ user.since_date }}" style="width:160px; margin-bottom:14px;">
-        </div>
-
-        <div style="background:#f8f9fb; border:1px solid #eee; border-radius:8px; padding:14px 16px 6px; margin-top:14px;">
-          <div style="font-weight:700; font-size:13px; margin-bottom:6px;">第二步：筛选附件 —— 邮件命中后，决定保存哪些附件（可选）</div>
-          <label>附件文件名必须包含（逗号分隔，留空=保存该邮件的所有附件）</label>
+          <div style="font-weight:700; font-size:13px; margin-bottom:6px;">按附件文件名筛选（最常用，填这个就够了）</div>
+          <label>附件文件名必须包含（逗号分隔）</label>
           <input type="text" name="attachment_name_filter" value="{{ user.attachment_name_filter }}" placeholder="例如：invoice, statement, 发票">
-          <p class="hint" style="margin-top:4px; margin-bottom:14px;">按附件本身的文件名筛选，跟第一步是靠关键词还是发件人命中无关。填了之后，哪怕邮件主题完全没有关键词，只要邮件带附件、且某个附件的文件名对得上，也会被抓出来；同一封邮件有多个附件时，只有名字对得上的会被保存，其他的跳过。</p>
+          <p class="hint" style="margin-top:4px; margin-bottom:14px;">只填这一项就够用：程序会检查<b>每一封带附件的邮件</b>（不看主题、不限发件人），只要某个附件的文件名对得上这里的词，就会被保存下来；同一封邮件有多个附件时，只有名字对得上的会被保存，其他的跳过。下面"按发件人/关键词筛选"是额外的可选项，用来先缩小要检查的邮件范围（比如只看某几个人发的），不填就不做这层限制。</p>
         </div>
+
+        <details style="margin-top:14px;" {% if user.keywords or user.sender_domains or user.specific_senders or user.since_date %}open{% endif %}>
+          <summary style="cursor:pointer; font-size:13px; color:#666; font-weight:700;">可选：按发件人 / 关键词先缩小范围（不填就检查所有邮件）</summary>
+          <div style="margin-top:10px; padding-left:2px; background:#f8f9fb; border:1px solid #eee; border-radius:8px; padding:14px 16px 6px;">
+            <p class="hint" style="margin:0 0 8px;">下面几项，邮件只要满足其中<b>任意一个</b>就算命中（不需要同时满足）。全部留空 = 不做这层限制，只靠上面的附件文件名筛选。</p>
+
+            <label>关键词（主题/正文包含，逗号分隔，可留空）</label>
+            <input type="text" name="keywords" value="{{ user.keywords }}">
+
+            <div class="checkbox-row">
+              <input type="checkbox" id="require_attachment" name="require_attachment" {% if user.require_attachment_for_keyword_match %}checked{% endif %}>
+              <label for="require_attachment" style="margin:0;">关键词命中时要求邮件必须带附件（推荐勾选）</label>
+            </div>
+
+            <label>信任发件人域名（逗号分隔，可留空）</label>
+            <input type="text" name="sender_domains" value="{{ user.sender_domains }}">
+
+            <label>信任发件人邮箱（逗号分隔，可留空 —— 批量筛选特定发件人就填这里）</label>
+            <input type="text" name="specific_senders" value="{{ user.specific_senders }}">
+
+            <label>只扫描此日期之后（YYYY-MM-DD，留空=全部历史）</label>
+            <input type="text" name="since_date" value="{{ user.since_date }}" style="width:160px; margin-bottom:14px;">
+          </div>
+        </details>
 
         <details style="margin-top:14px;" {% if user.precise_mode %}open{% endif %}>
           <summary style="cursor:pointer; font-size:13px; color:#666; font-weight:700;">进阶：更严格的邮件筛选（要求主题和发件人必须同时匹配，一般不需要）{% if user.precise_mode %} <span style="color:#d6323c;">（当前已启用）</span>{% endif %}</summary>
           <div style="margin-top:10px; padding-left:2px;">
             <div class="checkbox-row">
               <input type="checkbox" id="precise_mode" name="precise_mode" {% if user.precise_mode %}checked{% endif %}>
-              <label for="precise_mode" style="margin:0;">启用（会替换掉"第一步"的筛选规则，改成要求主题和发件人必须<b>同时</b>匹配）</label>
+              <label for="precise_mode" style="margin:0;">启用（会替换掉上面"按发件人/关键词筛选"的规则，改成要求主题和发件人必须<b>同时</b>匹配）</label>
             </div>
 
             <label>精确匹配 - 邮件主题包含（逗号分隔）</label>
@@ -131,7 +132,7 @@
             <label>精确匹配 - 附件文件名包含（逗号分隔）</label>
             <input type="text" name="precise_attachment" value="{{ user.precise_attachment }}">
 
-            <p class="hint">只有真的需要"主题必须含 X，而且发件人必须是 Y"这种双重限制时才勾这个。像"按发件人批量筛选 + 按附件名筛选"这种需求，不用勾这个，用上面第一步+第二步就够了。</p>
+            <p class="hint">只有真的需要"主题必须含 X，而且发件人必须是 Y"这种双重限制时才勾这个。像"按发件人批量筛选 + 按附件名筛选"这种需求，不用勾这个，用上面"按附件文件名筛选"+"按发件人/关键词筛选"就够了。</p>
           </div>
         </details>
 
@@ -449,6 +450,21 @@
     }, true);
 
     ajaxSubmitForm(document.getElementById('config-form'));
+
+    // 附件文件名筛选、关键词、发件人这几项如果全部留空（精确模式也没开），
+    // 就永远不会有邮件命中，运行了也是白跑一趟——保存前提醒一下，别让人纳闷"怎么什么都没抓到"。
+    document.getElementById('config-form').addEventListener('submit', (e) => {
+      const f = document.getElementById('config-form');
+      const allEmpty = !f.attachment_name_filter.value.trim()
+        && !f.keywords.value.trim()
+        && !f.sender_domains.value.trim()
+        && !f.specific_senders.value.trim()
+        && !f.precise_mode.checked;
+      if (allEmpty && !confirm('"按附件文件名筛选"和"按发件人/关键词筛选"都留空了，运行时不会保存任何附件。确定要这样保存吗？')) {
+        e.stopImmediatePropagation();
+        e.preventDefault();
+      }
+    }, true);
   </script>
 </body>
 </html>
