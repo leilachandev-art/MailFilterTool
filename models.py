@@ -31,6 +31,12 @@ class User(db.Model):
     require_attachment_for_keyword_match = db.Column(db.Boolean, default=True)
     since_date = db.Column(db.String(20), default="")
 
+    # 邮件命中后（不管是靠上面的关键词/信任发件人，还是靠下面的精确匹配），
+    # 同一封邮件里往往有好几个附件（发票、报价单、条款说明等混在一起），
+    # 这个字段用来在"附件"这一层再筛一遍：只有文件名包含这里任意一个词的附件才会真正保存，
+    # 留空就不做限制（保存这封邮件的所有附件，是老行为）。
+    attachment_name_filter = db.Column(db.Text, default="")
+
     precise_mode = db.Column(db.Boolean, default=False)
     precise_subject = db.Column(db.Text, default="")
     precise_sender = db.Column(db.Text, default="")

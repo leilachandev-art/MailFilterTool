@@ -203,6 +203,7 @@ def _do_sync(app, user_id, run_id):
         precise_subject_kw = _split(user.precise_subject)
         precise_sender_kw = _split(user.precise_sender)
         precise_attachment_kw = _split(user.precise_attachment)
+        attachment_name_kw = _split(user.attachment_name_filter)
 
         folder_path = user.onedrive_folder or "INVOICE-SORTING-RESULT"
         local_folder = (user.local_folder or "").strip()
@@ -292,7 +293,12 @@ def _do_sync(app, user_id, run_id):
                             keywords, sender_domains, specific_senders, require_attachment,
                         )
 
-                    if not ok:
+                    # 邮件主题/正文没命中关键词时，如果填了"附件文件名必须包含"，不要直接放弃这封邮件——
+                    # 主题这种关键词，邮箱自带的搜索框就能搜到；这个工具更该靠附件本身的文件名来判断，
+                    # 哪怕主题完全没有 "invoice" 字样，只要附件文件名里有，也应该抓出来。
+                    check_attachments_anyway = bool(attachment_name_kw) and attach and not ok
+
+                    if not ok and not check_attachments_anyway:
                         db.session.add(ProcessedMessage(user_id=user.id, uid=message_id))
                         db.session.commit()
                         processed_uids.add(message_id)
@@ -310,6 +316,10 @@ def _do_sync(app, user_id, run_id):
                     for a in attachments:
                         filename = safe_filename(a.get("attachmentName", "attachment"))
                         if precise_mode and not _match_any(filename, precise_attachment_kw):
+                            continue
+                        # 不管邮件是靠关键词还是精确匹配命中的，这一层单独按附件文件名再筛一遍——
+                        # 同一封邮件里经常混着发票和其他不相关的附件，只留文件名对得上的。
+                        if attachment_name_kw and not _match_any(filename, attachment_name_kw):
                             continue
 
                         content = zmail.download_attachment(

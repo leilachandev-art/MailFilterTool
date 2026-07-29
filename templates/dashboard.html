@@ -100,6 +100,10 @@
         <label>只扫描此日期之后（YYYY-MM-DD，留空=全部历史）</label>
         <input type="text" name="since_date" value="{{ user.since_date }}" style="width:160px;">
 
+        <label>附件文件名必须包含（逗号分隔，留空=不限制）</label>
+        <input type="text" name="attachment_name_filter" value="{{ user.attachment_name_filter }}" placeholder="例如：invoice, statement, 发票">
+        <p class="hint" style="margin-top:4px;">按附件本身的文件名筛选，跟邮件主题是否命中关键词无关——哪怕主题里完全没有这些词，只要邮件带附件，且某个附件的文件名包含这里填的词，也会被抓下来（主题关键词这种，邮箱自带搜索就能查，不用这个工具重复做）。同一封邮件有多个附件时，只有文件名对得上的那几个会被保存，其他的会跳过。留空则不做这层限制，按上面的邮件级别筛选结果保存全部附件。</p>
+
         <div class="checkbox-row" style="margin-top:16px;">
           <input type="checkbox" id="precise_mode" name="precise_mode" {% if user.precise_mode %}checked{% endif %}>
           <label for="precise_mode" style="margin:0;">启用精确筛选（忽略上面的关键词/信任发件人，只用下面三项）</label>

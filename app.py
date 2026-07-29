@@ -351,6 +351,7 @@ def register_routes(app):
         user.specific_senders = request.form.get("specific_senders", "")
         user.require_attachment_for_keyword_match = bool(request.form.get("require_attachment"))
         user.since_date = request.form.get("since_date", "").strip()
+        user.attachment_name_filter = request.form.get("attachment_name_filter", "")
 
         user.precise_mode = bool(request.form.get("precise_mode"))
         user.precise_subject = request.form.get("precise_subject", "")
