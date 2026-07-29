@@ -162,6 +162,54 @@ def _respond(message, ok=True, **extra):
     return redirect(url_for("dashboard"))
 
 
+RECORDS_PAGE_SIZE = 20
+
+
+def _query_manifest_page(user_id, page):
+    """处理记录按"邮件"(uid)分组、分页查询，供 dashboard 页面首次渲染和
+    /manifest 这个 AJAX 刷新接口共用，避免逻辑写两遍出现不一致。"""
+    page = page if page and page >= 1 else 1
+
+    grouped_q = (
+        db.session.query(ManifestEntry.uid, func.max(ManifestEntry.created_at).label("latest"))
+        .filter(ManifestEntry.user_id == user_id)
+        .group_by(ManifestEntry.uid)
+        .order_by(func.max(ManifestEntry.created_at).desc())
+    )
+    total_emails = grouped_q.count()
+    total_pages = max(1, (total_emails + RECORDS_PAGE_SIZE - 1) // RECORDS_PAGE_SIZE)
+    page = min(page, total_pages)
+    page_uids = [
+        row.uid
+        for row in grouped_q.offset((page - 1) * RECORDS_PAGE_SIZE).limit(RECORDS_PAGE_SIZE).all()
+    ]
+
+    grouped_entries = []
+    if page_uids:
+        rows = ManifestEntry.query.filter(
+            ManifestEntry.user_id == user_id, ManifestEntry.uid.in_(page_uids)
+        ).all()
+        by_uid = {}
+        for e in rows:
+            by_uid.setdefault(e.uid, []).append(e)
+        for uid in page_uids:
+            items = sorted(by_uid.get(uid, []), key=lambda e: e.created_at)
+            if not items:
+                continue
+            first = items[0]
+            grouped_entries.append(
+                {
+                    "sender": first.sender,
+                    "subject": first.subject,
+                    "mail_date": first.mail_date,
+                    "created_at": max(e.created_at for e in items),
+                    "attachments": items,
+                }
+            )
+
+    return grouped_entries, page, total_pages, total_emails
+
+
 def register_routes(app):
     @app.route("/")
     def index():
@@ -277,8 +325,6 @@ def register_routes(app):
 
     # ---------------- 仪表盘 / 配置 / 运行 ----------------
 
-    RECORDS_PAGE_SIZE = 20
-
     @app.route("/dashboard")
     def dashboard():
         user = current_user()
@@ -288,45 +334,7 @@ def register_routes(app):
         # 处理记录按"邮件"(uid)分组显示：同一封邮件命中多个附件时合并成一行，
         # 并支持分页，能翻到本次运行/以前所有运行产生的全部记录，不再只截前 50 条。
         page = request.args.get("page", 1, type=int) or 1
-        if page < 1:
-            page = 1
-
-        grouped_q = (
-            db.session.query(ManifestEntry.uid, func.max(ManifestEntry.created_at).label("latest"))
-            .filter(ManifestEntry.user_id == user.id)
-            .group_by(ManifestEntry.uid)
-            .order_by(func.max(ManifestEntry.created_at).desc())
-        )
-        total_emails = grouped_q.count()
-        total_pages = max(1, (total_emails + RECORDS_PAGE_SIZE - 1) // RECORDS_PAGE_SIZE)
-        page = min(page, total_pages)
-        page_uids = [
-            row.uid
-            for row in grouped_q.offset((page - 1) * RECORDS_PAGE_SIZE).limit(RECORDS_PAGE_SIZE).all()
-        ]
-
-        grouped_entries = []
-        if page_uids:
-            rows = ManifestEntry.query.filter(
-                ManifestEntry.user_id == user.id, ManifestEntry.uid.in_(page_uids)
-            ).all()
-            by_uid = {}
-            for e in rows:
-                by_uid.setdefault(e.uid, []).append(e)
-            for uid in page_uids:
-                items = sorted(by_uid.get(uid, []), key=lambda e: e.created_at)
-                if not items:
-                    continue
-                first = items[0]
-                grouped_entries.append(
-                    {
-                        "sender": first.sender,
-                        "subject": first.subject,
-                        "mail_date": first.mail_date,
-                        "created_at": max(e.created_at for e in items),
-                        "attachments": items,
-                    }
-                )
+        grouped_entries, page, total_pages, total_emails = _query_manifest_page(user.id, page)
 
         status = RunStatus.query.get(user.id)
         return render_template(
@@ -338,6 +346,51 @@ def register_routes(app):
             page=page,
             total_pages=total_pages,
             total_emails=total_emails,
+        )
+
+    @app.route("/manifest")
+    def manifest_page():
+        """给"处理记录"表格用的 AJAX 刷新接口：运行结束后前端拿这个把表格内容更新一遍，
+        不用整页刷新（也不会把页面滚动位置弹回顶部）。"""
+        user = current_user()
+        if not user:
+            return jsonify({"error": "not logged in"}), 401
+
+        page = request.args.get("page", 1, type=int) or 1
+        grouped_entries, page, total_pages, total_emails = _query_manifest_page(user.id, page)
+
+        def _attachment_json(a):
+            # 跟 dashboard.html 里那段 Jinja 逻辑保持一致：onedrive_link 这个字段是老功能
+            # （OneDrive 直传/保存到服务器本地路径）留下的，现在新记录基本都是"打包下载"模式，
+            # 但历史记录可能还是 http 链接或者本地绝对路径，这里原样区分展示。
+            link = a.onedrive_link
+            if link and link.startswith("http"):
+                return {"filename": a.original_filename, "kind": "link", "href": link}
+            if link and link != a.original_filename:
+                return {"filename": a.original_filename, "kind": "path", "path": link}
+            return {
+                "filename": a.original_filename,
+                "kind": "download",
+                "download_url": url_for("download_run", run_id=a.run_id) if a.run_id else None,
+            }
+
+        entries_json = [
+            {
+                "sender": e["sender"],
+                "subject": e["subject"],
+                "created_at": e["created_at"].strftime("%Y-%m-%d %H:%M") if e["created_at"] else "",
+                "attachments": [_attachment_json(a) for a in e["attachments"]],
+            }
+            for e in grouped_entries
+        ]
+
+        return jsonify(
+            {
+                "entries": entries_json,
+                "page": page,
+                "total_pages": total_pages,
+                "total_emails": total_emails,
+            }
         )
 
     @app.route("/config", methods=["POST"])
