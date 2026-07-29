@@ -359,32 +359,18 @@ def register_routes(app):
 
         user.onedrive_folder = request.form.get("onedrive_folder", "INVOICE-SORTING-RESULT").strip() or "INVOICE-SORTING-RESULT"
 
-        sync_target = request.form.get("sync_target", "download")
-        message = "配置已保存。"
-        if sync_target == "onedrive":
-            message = "OneDrive 同步功能还在调试中，暂未开放，已经按「打包下载 ZIP」方式保存配置。"
-            sync_target = "download"
-        if sync_target not in ("local", "download"):
-            sync_target = "download"
-        user.sync_target = sync_target
-        user.local_folder = request.form.get("local_folder", "").strip()
+        # 投递方式现在只保留"打包下载 ZIP"，OneDrive 还在调试、本地路径只适合单机自跑，
+        # 都不再通过界面暴露，这里直接固定成 download，不再接受表单传来的值。
+        user.sync_target = "download"
 
         db.session.commit()
-        return _respond(message)
+        return _respond("配置已保存。")
 
     @app.route("/run", methods=["POST"])
     def run_now():
         user = current_user()
         if not user:
             return redirect(url_for("index"))
-
-        if user.sync_target == "onedrive":
-            return _respond(
-                "OneDrive 同步功能还在调试中，暂未开放。请先在上面把投递方式保存为「打包下载 ZIP」再运行。", ok=False
-            )
-
-        if user.sync_target == "local" and not user.local_folder:
-            return _respond("请先填写本地保存路径再运行。", ok=False)
 
         status = RunStatus.query.get(user.id)
         if status and status.is_running:
@@ -395,49 +381,6 @@ def register_routes(app):
         thread.start()
 
         return _respond("已开始运行，下面的日志会自动刷新。")
-
-    @app.route("/list_dirs")
-    def list_dirs():
-        """给"浏览"面板用的纯 HTTP 目录列表接口（不依赖任何 GUI 库，不会把网站进程搞崩）。
-        path 为空时列出 Windows 磁盘分区；否则列出该路径下的子文件夹。"""
-        user = current_user()
-        if not user:
-            return jsonify({"error": "not logged in"}), 401
-
-        path = request.args.get("path", "").strip()
-
-        try:
-            if not path:
-                if os.name == "nt":
-                    import string
-                    drives = [f"{d}:\\" for d in string.ascii_uppercase if os.path.exists(f"{d}:\\")]
-                    return jsonify({"path": "", "parent": None, "dirs": drives})
-                path = "/"
-
-            if not os.path.isdir(path):
-                return jsonify({"error": f"路径不存在或不是文件夹：{path}"}), 400
-
-            names = []
-            with os.scandir(path) as it:
-                for entry in it:
-                    try:
-                        if entry.is_dir(follow_symlinks=False):
-                            names.append(entry.name)
-                    except OSError:
-                        continue
-            names.sort(key=str.lower)
-
-            norm = os.path.normpath(path)
-            parent = os.path.dirname(norm)
-            if parent == norm:
-                # 已经是磁盘根目录（比如 E:\），"上一级"回到磁盘列表
-                parent = ""
-
-            return jsonify({"path": path, "parent": parent, "dirs": names})
-        except PermissionError:
-            return jsonify({"error": "没有权限访问这个文件夹"}), 403
-        except Exception as e:
-            return jsonify({"error": str(e)}), 500
 
     @app.route("/download/<run_id>")
     def download_run(run_id):

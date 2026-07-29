@@ -24,6 +24,12 @@
     .btn:hover { background: #b8272f; }
     .btn-secondary { background: #444; }
     .btn-secondary:hover { background: #222; }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn:disabled:hover { background: #d6323c; }
+    .btn-secondary:disabled:hover { background: #444; }
+    /* 停止按钮不用 disabled 属性(那样点击不会有任何反馈)，改用这个类只做视觉变灰，
+       点击时仍然会提交，由后端告诉用户"当前没有正在运行的任务"。 */
+    .btn-secondary.inactive { opacity: 0.4; }
     .hint { color: #888; font-size: 12px; margin-top: 4px; }
     .flash { background: #fff3cd; color: #664d03; padding: 10px; border-radius: 6px; margin-bottom: 16px; font-size: 13px; }
     #log-box { background: #111; color: #ddd; font-family: monospace; font-size: 12px; padding: 12px; border-radius: 8px; height: 220px; overflow-y: auto; white-space: pre-wrap; }
@@ -109,49 +115,7 @@
         <input type="text" name="precise_attachment" value="{{ user.precise_attachment }}">
 
         <label style="margin-top:16px;">投递方式</label>
-        <div class="checkbox-row">
-          <input type="radio" id="target_onedrive" name="sync_target" value="onedrive" onclick="return blockOnedrive(event)">
-          <label for="target_onedrive" style="margin:0; color:#999;">上传到 OneDrive（调试中，暂未开放）</label>
-        </div>
-        <div class="checkbox-row">
-          <input type="radio" id="target_download" name="sync_target" value="download" {% if user.sync_target != 'local' %}checked{% endif %} onchange="toggleTarget()">
-          <label for="target_download" style="margin:0;">打包下载 ZIP（推荐，网站部署在哪都能用，不用装任何东西）</label>
-        </div>
-        <div class="checkbox-row">
-          <input type="radio" id="target_local" name="sync_target" value="local" {% if user.sync_target == 'local' %}checked{% endif %} onchange="toggleTarget()">
-          <label for="target_local" style="margin:0;">保存到服务器本地路径（进阶用法，适合自己在本机跑这个网站）</label>
-        </div>
-
-        <div id="onedrive-fields" style="display:none;">
-          <label>OneDrive 目标文件夹</label>
-          <input type="text" name="onedrive_folder" value="{{ user.onedrive_folder }}">
-        </div>
-
-        <div id="download-fields" style="display:{% if user.sync_target != 'local' %}block{% else %}none{% endif %}; margin-top:8px;">
-          <p class="hint">运行完成后，页面上会出现"下载本次结果"按钮，点一下就会把这次命中的附件打包成 ZIP，通过浏览器正常下载流程存到你自己电脑（一般是"下载"文件夹），跟网站部署在哪台服务器上没关系。</p>
-        </div>
-
-        <div id="local-fields" style="display:{% if user.sync_target == 'local' %}block{% else %}none{% endif %};">
-          <label>本地保存路径（填运行这个网站的那台电脑上的磁盘路径，例如 E:\logistic\InvoiceResult）</label>
-          <div style="display:flex; gap:8px;">
-            <input type="text" name="local_folder" id="local_folder_input" value="{{ user.local_folder }}" placeholder="E:\logistic\InvoiceResult" style="flex:1;">
-            <button type="button" class="btn btn-secondary" id="browse-btn" style="white-space:nowrap;">浏览...</button>
-          </div>
-
-          <div id="folder-browser" style="display:none; border:1px solid #ddd; border-radius:6px; padding:10px; margin-top:8px; background:#fafafa;">
-            <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
-              <button type="button" class="btn btn-secondary" id="fb-up-btn" style="padding:4px 10px; font-size:12px;">上一级</button>
-              <span id="fb-current-path" style="font-size:12px; color:#555; word-break:break-all;"></span>
-            </div>
-            <div id="fb-list" style="max-height:200px; overflow-y:auto; font-size:13px; border:1px solid #eee; border-radius:4px; background:#fff;"></div>
-            <div style="margin-top:8px; display:flex; gap:8px;">
-              <button type="button" class="btn" id="fb-select-btn" style="padding:5px 14px; font-size:12px;">选择当前文件夹</button>
-              <button type="button" class="btn btn-secondary" id="fb-cancel-btn" style="padding:5px 14px; font-size:12px;">取消</button>
-            </div>
-          </div>
-
-          <p class="hint">注意：这里的"本地"是指运行这个网站的那台电脑的磁盘，不是访问网站那个人的电脑。网站集中部署给大家用的时候不建议选这个（写的是服务器磁盘），只适合自己在本机跑着测试用。</p>
-        </div>
+        <p class="hint" style="margin-top:0;">运行完成后，页面上会出现"下载本次结果"按钮，点一下就会把这次命中的附件打包成 ZIP，通过浏览器正常下载流程存到你自己电脑（一般是"下载"文件夹），跟网站部署在哪台服务器上没关系。（OneDrive 直传还在调试中，暂未开放。）</p>
 
         <div style="margin-top: 18px;">
           <button class="btn" type="submit">保存配置</button>
@@ -169,7 +133,7 @@
       </form>
       <form method="post" action="{{ url_for('stop_run') }}" id="stop-form" style="display:inline; margin-left:8px;">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-        <button class="btn btn-secondary" type="submit" id="stop-btn" {% if not (status and status.is_running) %}disabled{% endif %}>
+        <button class="btn btn-secondary{% if not (status and status.is_running) %} inactive{% endif %}" type="submit" id="stop-btn">
           停止运行
         </button>
       </form>
@@ -245,92 +209,6 @@
   </div>
 
   <script>
-    function toggleTarget() {
-      const isLocal = document.getElementById('target_local').checked;
-      document.getElementById('onedrive-fields').style.display = 'none';
-      document.getElementById('local-fields').style.display = isLocal ? 'block' : 'none';
-      document.getElementById('download-fields').style.display = isLocal ? 'none' : 'block';
-    }
-
-    // OneDrive 那条链路还在调试中，先不让选，点了给个提示，仍然停在"打包下载 ZIP"。
-    function blockOnedrive(event) {
-      event.preventDefault();
-      alert('OneDrive 同步功能还在调试中，暂未开放，先用"打包下载 ZIP"吧。');
-      document.getElementById('target_download').checked = true;
-      toggleTarget();
-      return false;
-    }
-
-    // ---- 本地文件夹浏览面板（纯 HTTP，不依赖任何 GUI 库） ----
-    let fbCurrentPath = "";
-    let fbParentPath = "";
-
-    function fbLoad(path) {
-      fetch("{{ url_for('list_dirs') }}?path=" + encodeURIComponent(path))
-        .then(r => r.json())
-        .then(data => {
-          if (data.error) {
-            if (path !== "") {
-              fbLoad("");  // 目标路径打不开，回退到磁盘列表
-            } else {
-              alert(data.error);
-            }
-            return;
-          }
-          fbCurrentPath = data.path;
-          fbParentPath = data.parent;
-          document.getElementById('fb-current-path').textContent = fbCurrentPath || "（选择磁盘）";
-          document.getElementById('fb-up-btn').disabled = (fbParentPath === null);
-          const listEl = document.getElementById('fb-list');
-          listEl.innerHTML = "";
-          if (!data.dirs.length) {
-            listEl.innerHTML = '<div style="padding:8px; color:#999;">（没有子文件夹）</div>';
-          }
-          data.dirs.forEach(name => {
-            const item = document.createElement('div');
-            item.textContent = "📁 " + name;
-            item.style.padding = "6px 8px";
-            item.style.cursor = "pointer";
-            item.addEventListener('mouseenter', () => item.style.background = "#eee");
-            item.addEventListener('mouseleave', () => item.style.background = "transparent");
-            item.addEventListener('click', () => {
-              if (!fbCurrentPath) {
-                fbLoad(name);  // 在磁盘列表里，name 本身就是完整盘符路径
-              } else {
-                const sep = fbCurrentPath.endsWith('\\') || fbCurrentPath.endsWith('/') ? '' : '\\';
-                fbLoad(fbCurrentPath + sep + name);
-              }
-            });
-            listEl.appendChild(item);
-          });
-        })
-        .catch(err => alert('加载文件夹失败：' + err));
-    }
-
-    const browseBtn = document.getElementById('browse-btn');
-    if (browseBtn) {
-      browseBtn.addEventListener('click', () => {
-        const panel = document.getElementById('folder-browser');
-        const willShow = panel.style.display === 'none';
-        panel.style.display = willShow ? 'block' : 'none';
-        if (willShow) {
-          fbLoad(document.getElementById('local_folder_input').value.trim());
-        }
-      });
-      document.getElementById('fb-up-btn').addEventListener('click', () => {
-        if (fbParentPath !== null) fbLoad(fbParentPath);
-      });
-      document.getElementById('fb-select-btn').addEventListener('click', () => {
-        if (fbCurrentPath) {
-          document.getElementById('local_folder_input').value = fbCurrentPath;
-        }
-        document.getElementById('folder-browser').style.display = 'none';
-      });
-      document.getElementById('fb-cancel-btn').addEventListener('click', () => {
-        document.getElementById('folder-browser').style.display = 'none';
-      });
-    }
-
     // ---- 小 toast 提示，代替整页刷新后在顶部展示的 flash 消息 ----
     let toastTimer = null;
     function showToast(message, ok = true) {
@@ -385,14 +263,14 @@
           if (data.is_running) {
             runBtn.disabled = true;
             runBtn.textContent = "运行中...";
-            stopBtn.disabled = false;
+            stopBtn.classList.remove('inactive');
             clearBtn.disabled = true;
             progressLine.style.display = 'block';
             downloadReady.style.display = 'none';
           } else {
             runBtn.disabled = false;
             runBtn.textContent = "立即运行";
-            stopBtn.disabled = true;
+            stopBtn.classList.add('inactive');
             clearBtn.disabled = false;
             progressLine.style.display = 'none';
             if (data.download_url) {
@@ -426,12 +304,21 @@
     });
 
     ajaxSubmitForm(document.getElementById('stop-form'), () => {
-      stopBtn.disabled = true;
       if (!polling) polling = setInterval(poll, 2000);
       poll();
     });
 
-    ajaxSubmitForm(document.getElementById('clear-form'));
+    ajaxSubmitForm(document.getElementById('clear-form'), (data) => {
+      if (data.ok) {
+        // 清空处理记录后，运行模块里显示的是上一次运行留下的旧日志/进度/下载链接，
+        // 跟"已清空"的状态对不上了，这里跟着重置成初始状态，避免误导。
+        logBox.textContent = '（日志会在运行时显示在这里）';
+        progressChecked.textContent = '0';
+        progressSaved.textContent = '0';
+        progressLine.style.display = 'none';
+        downloadReady.style.display = 'none';
+      }
+    });
 
     document.getElementById('clear-form').addEventListener('submit', (e) => {
       if (!confirm('确定要清空处理记录吗？清空后下次运行会重新扫描所有历史邮件，之前已经保存过的附件可能会重复保存一份。')) {
