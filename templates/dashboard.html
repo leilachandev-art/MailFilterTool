@@ -10,12 +10,11 @@
     header .title { font-weight: 700; }
     header .who { font-size: 13px; color: #666; }
     header a { color: #3281d6; text-decoration: none; font-size: 13px; }
-    .wrap { max-width: 900px; margin: 24px auto; padding: 0 16px; }
+    .wrap { max-width: 980px; margin: 24px auto; padding: 0 16px; }
     .card { background: #fff; border-radius: 10px; padding: 20px 24px; margin-bottom: 20px; box-shadow: 0 1px 4px rgba(0,0,0,0.06); }
     .card h2 { font-size: 16px; margin: 0 0 14px; }
     .status-badge { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
     .status-ok { background: #e6f4ea; color: #1e7e34; }
-    .status-off { background: #fdecea; color: #b3261e; }
     .row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
     label { display: block; font-size: 13px; color: #444; margin: 12px 0 4px; }
     input[type=text] { width: 100%; padding: 8px 10px; border: 1px solid #ddd; border-radius: 6px; box-sizing: border-box; font-size: 13px; }
@@ -69,67 +68,36 @@
         <span>Zoho 邮箱</span>
         <span class="status-badge status-ok">已连接</span>
       </div>
-      <div class="row">
-        <span>OneDrive {% if user.ms_account_name %}（{{ user.ms_account_name }}）{% endif %}</span>
-        {% if user.onedrive_connected() %}
-          <span class="status-badge status-ok">已连接</span>
-        {% else %}
-          <a class="btn" href="{{ url_for('connect_microsoft') }}">连接 OneDrive</a>
-        {% endif %}
-      </div>
     </div>
 
     <div class="card">
       <h2>筛选条件</h2>
+      <p class="hint" style="margin-top:0;">跟你在网页邮箱搜索框里用的是同一套 Zoho 搜索语法——主题/附件名/发件人这几项会直接交给 Zoho 在服务端搜；"发件人排除"是 Zoho 语法不支持的反向条件，由这个网站自己在拿到结果后再过滤一遍。多个值用逗号分隔，同一项内满足任意一个即可。</p>
       <form method="post" action="{{ url_for('save_config') }}" id="config-form">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 
-        <label title="邮件带附件、且附件文件名含这些词就会保存，不看主题/发件人。留空则按下面的筛选结果保存全部附件。">附件文件名包含</label>
-        <input type="text" name="attachment_name_filter" value="{{ user.attachment_name_filter }}" placeholder="invoice, statement, 发票" title="邮件带附件、且附件文件名含这些词就会保存，不看主题/发件人。留空则按下面的筛选结果保存全部附件。">
+        <label>主题包含</label>
+        <input type="text" name="search_subject_contains" value="{{ user.search_subject_contains }}" placeholder="invoice, 发票">
 
-        <details style="margin-top:14px;" {% if user.keywords or user.sender_domains or user.specific_senders or user.since_date %}open{% endif %}>
-          <summary style="cursor:pointer; font-size:13px; color:#666; font-weight:700;">按发件人 / 关键词缩小范围（可选，满足任一项即可）</summary>
-          <div style="margin-top:10px;">
-            <label>关键词</label>
-            <input type="text" name="keywords" value="{{ user.keywords }}" placeholder="发票, invoice, bill" title="主题或正文包含即可，逗号分隔">
+        <label>附件文件名包含</label>
+        <input type="text" name="search_attachment_contains" value="{{ user.search_attachment_contains }}" placeholder="invoice, statement">
 
-            <div class="checkbox-row">
-              <input type="checkbox" id="require_attachment" name="require_attachment" {% if user.require_attachment_for_keyword_match %}checked{% endif %}>
-              <label for="require_attachment" style="margin:0;">关键词命中需带附件</label>
-            </div>
+        <label>发件人包含</label>
+        <input type="text" name="search_sender_contains" value="{{ user.search_sender_contains }}" placeholder="vendor.com 或 ap@vendor.com">
 
-            <label>信任发件人域名</label>
-            <input type="text" name="sender_domains" value="{{ user.sender_domains }}" placeholder="vendor.com">
+        <label>正文包含</label>
+        <input type="text" name="search_content_contains" value="{{ user.search_content_contains }}" placeholder="invoice, 发票">
 
-            <label>信任发件人邮箱</label>
-            <input type="text" name="specific_senders" value="{{ user.specific_senders }}" placeholder="ap@vendor.com">
+        <label title="Zoho 搜索语法本身不支持排除条件，这里是网站自己在拿到 Zoho 搜索结果之后再过滤一遍。">发件人排除（不包含）</label>
+        <input type="text" name="search_sender_excludes" value="{{ user.search_sender_excludes }}" placeholder="tanzlogis.com" title="Zoho 搜索语法本身不支持排除条件，这里是网站自己在拿到 Zoho 搜索结果之后再过滤一遍。">
 
-            <label>只扫描此日期之后</label>
-            <input type="text" name="since_date" value="{{ user.since_date }}" placeholder="YYYY-MM-DD" style="width:160px; margin-bottom:14px;">
-          </div>
-        </details>
+        <label>只扫描此日期之后</label>
+        <input type="text" name="search_since_date" value="{{ user.search_since_date }}" placeholder="YYYY-MM-DD" style="width:160px;">
 
-        <details style="margin-top:10px;" {% if user.precise_mode %}open{% endif %}>
-          <summary style="cursor:pointer; font-size:13px; color:#666; font-weight:700;">进阶：主题+发件人须同时匹配{% if user.precise_mode %} <span style="color:#3281d6;">（已启用）</span>{% endif %}</summary>
-          <div style="margin-top:10px;" title="会替换掉上面「按发件人/关键词」的规则，改成要求主题和发件人必须同时匹配。一般不需要。">
-            <div class="checkbox-row">
-              <input type="checkbox" id="precise_mode" name="precise_mode" {% if user.precise_mode %}checked{% endif %}>
-              <label for="precise_mode" style="margin:0;">启用</label>
-            </div>
-
-            <label>主题包含</label>
-            <input type="text" name="precise_subject" value="{{ user.precise_subject }}">
-
-            <label>发件人邮箱</label>
-            <input type="text" name="precise_sender" value="{{ user.precise_sender }}">
-
-            <label>附件文件名包含</label>
-            <input type="text" name="precise_attachment" value="{{ user.precise_attachment }}">
-          </div>
-        </details>
-
-        <label style="margin-top:18px;">投递方式</label>
-        <div style="font-size:13px; color:#444; padding:4px 0;">打包下载 ZIP</div>
+        <div class="checkbox-row" style="margin-top:14px;">
+          <input type="checkbox" id="search_require_attachment" name="search_require_attachment" {% if user.search_require_attachment %}checked{% endif %}>
+          <label for="search_require_attachment" style="margin:0;">只看带附件的邮件（推荐勾选）</label>
+        </div>
 
         <div style="margin-top: 18px;">
           <button class="btn" type="submit">保存配置</button>
@@ -176,36 +144,26 @@
     </div>
 
     <div class="card">
-      <h2>处理记录 <span id="manifest-count">{% if total_emails %}<span style="font-weight:400; color:#888; font-size:13px;">（共 {{ total_emails }} 封邮件命中）</span>{% endif %}</span></h2>
+      <h2>处理记录 <span id="manifest-count">{% if total_entries %}<span style="font-weight:400; color:#888; font-size:13px;">（共 {{ total_entries }} 个附件）</span>{% endif %}</span></h2>
+      <div style="margin-bottom:12px;">
+        <a class="btn btn-secondary" href="{{ url_for('export_excel') }}">导出 Excel</a>
+        <span class="hint" style="display:inline; margin-left:6px;">导出的下载链接需要登录同一个网站才能打开，服务器临时文件 3 天后会被清理，建议尽快下载，不要当长期归档用。</span>
+      </div>
       <table>
         <thead>
-          <tr><th>时间</th><th>发件人</th><th>主题</th><th>附件</th></tr>
+          <tr><th>时间</th><th>发件人名</th><th>发件人邮箱</th><th>主题</th><th>附件标题</th></tr>
         </thead>
         <tbody id="manifest-tbody">
           {% for e in entries %}
           <tr>
             <td style="white-space:nowrap;">{{ e.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
-            <td>{{ e.sender }}</td>
+            <td>{{ e.sender_name }}</td>
+            <td>{{ e.sender_email }}</td>
             <td>{{ e.subject }}</td>
-            <td>
-              {% for a in e.attachments %}
-                <div style="margin-bottom:{% if not loop.last %}4px{% else %}0{% endif %};">
-                  {% if a.onedrive_link and a.onedrive_link.startswith('http') %}
-                    <a class="link" href="{{ a.onedrive_link }}" target="_blank">{{ a.original_filename }}</a>
-                  {% elif a.onedrive_link and a.onedrive_link != a.original_filename %}
-                    {{ a.original_filename }} <span style="color:#999;">({{ a.onedrive_link }})</span>
-                  {% else %}
-                    {{ a.original_filename }}
-                    {% if a.run_id %}
-                      <a class="link" href="{{ url_for('download_run', run_id=a.run_id) }}" style="font-size:12px;">（下载所属批次 ZIP）</a>
-                    {% endif %}
-                  {% endif %}
-                </div>
-              {% endfor %}
-            </td>
+            <td><a class="link" href="{{ url_for('download_attachment', entry_id=e.id) }}">{{ e.original_filename }}</a></td>
           </tr>
           {% else %}
-          <tr><td colspan="4" style="color:#999;">还没有记录</td></tr>
+          <tr><td colspan="5" style="color:#999;">还没有记录</td></tr>
           {% endfor %}
         </tbody>
       </table>
@@ -286,38 +244,22 @@
       return String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     }
 
-    function renderAttachment(a) {
-      if (a.kind === 'link') {
-        return `<a class="link" href="${a.href}" target="_blank">${escapeHtml(a.filename)}</a>`;
-      }
-      if (a.kind === 'path') {
-        return `${escapeHtml(a.filename)} <span style="color:#999;">(${escapeHtml(a.path)})</span>`;
-      }
-      let html = escapeHtml(a.filename);
-      if (a.download_url) {
-        html += ` <a class="link" href="${a.download_url}" style="font-size:12px;">（下载所属批次 ZIP）</a>`;
-      }
-      return html;
-    }
-
     function renderManifest(data) {
       currentManifestPage = data.page;
-      manifestCount.innerHTML = data.total_emails
-        ? `<span style="font-weight:400; color:#888; font-size:13px;">（共 ${data.total_emails} 封邮件命中）</span>`
+      manifestCount.innerHTML = data.total_entries
+        ? `<span style="font-weight:400; color:#888; font-size:13px;">（共 ${data.total_entries} 个附件）</span>`
         : '';
 
       if (!data.entries.length) {
-        manifestTbody.innerHTML = '<tr><td colspan="4" style="color:#999;">还没有记录</td></tr>';
+        manifestTbody.innerHTML = '<tr><td colspan="5" style="color:#999;">还没有记录</td></tr>';
       } else {
-        manifestTbody.innerHTML = data.entries.map(e => {
-          const attachHtml = e.attachments.map(a => `<div style="margin-bottom:4px;">${renderAttachment(a)}</div>`).join('');
-          return `<tr>
+        manifestTbody.innerHTML = data.entries.map(e => `<tr>
             <td style="white-space:nowrap;">${escapeHtml(e.created_at)}</td>
-            <td>${escapeHtml(e.sender)}</td>
+            <td>${escapeHtml(e.sender_name)}</td>
+            <td>${escapeHtml(e.sender_email)}</td>
             <td>${escapeHtml(e.subject)}</td>
-            <td>${attachHtml}</td>
-          </tr>`;
-        }).join('');
+            <td><a class="link" href="${e.download_url}">${escapeHtml(e.filename)}</a></td>
+          </tr>`).join('');
       }
 
       if (data.total_pages > 1) {
@@ -425,8 +367,7 @@
       }
     }, true); // capture 阶段先跑，拦下不想提交的情况，AJAX 提交的监听器不会执行
 
-    // "清空附件历史"清的是下面那张可见表格，表格是服务端渲染的（含分页），
-    // 这里成功后直接刷新页面重新拿数据，比在前端手写一遍删表格逻辑更可靠。
+    // "清空附件历史"清的是下面那张可见表格，成功后重新拉一次数据渲染，不用整页刷新。
     ajaxSubmitForm(document.getElementById('clear-manifest-form'), (data) => {
       if (data.ok) {
         currentManifestPage = 1;
@@ -435,7 +376,7 @@
     });
 
     document.getElementById('clear-manifest-form').addEventListener('submit', (e) => {
-      if (!confirm('确定要清空附件历史吗？下面表格里显示的已保存附件记录会被永久删除，之前运行生成的下载链接也会跟着失效（不影响已经下载到你电脑上的文件）。这个操作不影响下次运行是否重新扫描邮件。')) {
+      if (!confirm('确定要清空附件历史吗？下面表格里显示的已保存附件记录会被永久删除，之前的下载链接也会跟着失效（不影响已经下载到你电脑上的文件）。这个操作不影响下次运行是否重新扫描邮件。')) {
         e.stopImmediatePropagation();
         e.preventDefault();
       }
@@ -443,16 +384,15 @@
 
     ajaxSubmitForm(document.getElementById('config-form'));
 
-    // 附件文件名筛选、关键词、发件人这几项如果全部留空（精确模式也没开），
-    // 就永远不会有邮件命中，运行了也是白跑一趟——保存前提醒一下，别让人纳闷"怎么什么都没抓到"。
+    // 筛选条件全部留空的话，Zoho 搜索没法执行，运行了也是白跑一趟——保存前提醒一下。
     document.getElementById('config-form').addEventListener('submit', (e) => {
       const f = document.getElementById('config-form');
-      const allEmpty = !f.attachment_name_filter.value.trim()
-        && !f.keywords.value.trim()
-        && !f.sender_domains.value.trim()
-        && !f.specific_senders.value.trim()
-        && !f.precise_mode.checked;
-      if (allEmpty && !confirm('"按附件文件名筛选"和"按发件人/关键词筛选"都留空了，运行时不会保存任何附件。确定要这样保存吗？')) {
+      const allEmpty = !f.search_subject_contains.value.trim()
+        && !f.search_attachment_contains.value.trim()
+        && !f.search_sender_contains.value.trim()
+        && !f.search_content_contains.value.trim()
+        && !f.search_require_attachment.checked;
+      if (allEmpty && !confirm('筛选条件全部留空了（"只看带附件的邮件"也没勾），运行时无法执行搜索。确定要这样保存吗？')) {
         e.stopImmediatePropagation();
         e.preventDefault();
       }

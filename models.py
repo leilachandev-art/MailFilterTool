@@ -1,7 +1,8 @@
 """
 models.py
-数据库模型。用 SQLite 存：用户（Zoho 身份 + OAuth 令牌 + 筛选配置）、
-已处理邮件记录（去重用）、投递清单（附件最终去了哪个 OneDrive 链接）、运行日志。
+数据库模型。用户身份：Zoho OAuth 登录 + 令牌；筛选配置是基于 Zoho Mail 原生搜索语法的
+几个结构化条件（主题包含/附件名包含/发件人包含/发件人排除/日期/是否要求带附件）；
+另外存已处理邮件记录（去重用）、投递清单（附件溯源信息 + 下载）、运行日志。
 """
 
 from datetime import datetime
@@ -20,35 +21,21 @@ class User(db.Model):
     zoho_accounts_server = db.Column(db.String(255), default="https://accounts.zoho.com")
     zoho_api_domain = db.Column(db.String(255), default="https://mail.zoho.com")
 
-    # ---- Microsoft OAuth（OneDrive）----
-    ms_refresh_token = db.Column(db.Text, nullable=True)
-    ms_account_name = db.Column(db.String(255), nullable=True)
+    # ---- 筛选配置：对应 Zoho 邮箱网页里"复合搜索"用的那几个条件 ----
+    # 主题/附件名/发件人这三项，会拼成 Zoho Mail 搜索 API 的 searchKey，交给 Zoho 自己在
+    # 服务端搜（跟你在网页邮箱搜索框里用 contains / attachment name / from 是同一套语法）。
+    # 逗号分隔多个值时，同一个条件内是"满足任意一个"（OR），不同条件之间是"必须同时满足"（AND）。
+    search_subject_contains = db.Column(db.Text, default="")
+    search_attachment_contains = db.Column(db.Text, default="")
+    search_sender_contains = db.Column(db.Text, default="")
+    search_content_contains = db.Column(db.Text, default="")  # 正文包含，对应 Zoho 的 content:
 
-    # ---- 筛选配置 ----
-    keywords = db.Column(db.Text, default="invoice, 发票, bill, receipt")
-    sender_domains = db.Column(db.Text, default="")
-    specific_senders = db.Column(db.Text, default="")
-    require_attachment_for_keyword_match = db.Column(db.Boolean, default=True)
-    since_date = db.Column(db.String(20), default="")
+    # "发件人不包含"——Zoho 的搜索语法没有"排除/不包含"这种反向条件，没法交给 Zoho 处理，
+    # 所以这个是我们自己的代码在拿到 Zoho 搜索结果之后，再筛一遍、把命中排除词的邮件跳过。
+    search_sender_excludes = db.Column(db.Text, default="")
 
-    # 邮件命中后（不管是靠上面的关键词/信任发件人，还是靠下面的精确匹配），
-    # 同一封邮件里往往有好几个附件（发票、报价单、条款说明等混在一起），
-    # 这个字段用来在"附件"这一层再筛一遍：只有文件名包含这里任意一个词的附件才会真正保存，
-    # 留空就不做限制（保存这封邮件的所有附件，是老行为）。
-    attachment_name_filter = db.Column(db.Text, default="")
-
-    precise_mode = db.Column(db.Boolean, default=False)
-    precise_subject = db.Column(db.Text, default="")
-    precise_sender = db.Column(db.Text, default="")
-    precise_attachment = db.Column(db.Text, default="")
-
-    onedrive_folder = db.Column(db.String(255), default="INVOICE-SORTING-RESULT")
-
-    # ---- 投递目标：onedrive / local（服务器磁盘路径，适合自己在本机跑）/ download（浏览器下载 ZIP） ----
-    # OneDrive 那条链路还在调试中，暂时先让新用户默认走"打包下载 ZIP"——
-    # 网站可以照常集中部署，同事不用在自己电脑装环境、跑代码。
-    sync_target = db.Column(db.String(20), default="download")
-    local_folder = db.Column(db.String(500), default="")
+    search_since_date = db.Column(db.String(20), default="")  # YYYY-MM-DD，对应 Zoho 的 fromDate
+    search_require_attachment = db.Column(db.Boolean, default=True)  # 对应 Zoho 的 has:attachment
 
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
@@ -56,12 +43,9 @@ class User(db.Model):
     last_login_at = db.Column(db.DateTime, nullable=True)
     login_count = db.Column(db.Integer, default=0)
 
-    def onedrive_connected(self):
-        return bool(self.ms_refresh_token)
-
 
 class ProcessedMessage(db.Model):
-    """记录某个用户已经检查过的邮件 UID，避免重复扫描。"""
+    """记录某个用户已经检查过的邮件 id，避免重复扫描。"""
 
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False, index=True)
@@ -71,18 +55,21 @@ class ProcessedMessage(db.Model):
 
 
 class ManifestEntry(db.Model):
-    """已投递的附件清单，用来在网页上展示 + 保留溯源信息。"""
+    """命中的附件清单：一行 = 一个附件，用来在网页表格 / Excel 导出里清晰展示溯源信息。"""
 
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False, index=True)
     run_id = db.Column(db.String(64), nullable=True, index=True)
-    uid = db.Column(db.String(64))
-    original_filename = db.Column(db.String(500))
-    sender = db.Column(db.String(500))
+    uid = db.Column(db.String(64))  # 邮件 message id，去重/溯源用
+
+    original_filename = db.Column(db.String(500))  # 附件原始文件名，用于显示
+    saved_filename = db.Column(db.String(500))  # 实际存在服务器临时目录里的文件名（重名时会加序号后缀）
+
+    sender_name = db.Column(db.String(500))  # 发件人显示名
+    sender_email = db.Column(db.String(500))  # 发件人邮箱地址
     subject = db.Column(db.String(1000))
     mail_date = db.Column(db.String(200))
     message_id = db.Column(db.String(500))
-    onedrive_link = db.Column(db.String(1000))
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 

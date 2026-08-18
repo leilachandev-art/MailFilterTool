@@ -1,9 +1,15 @@
 """
-webapp_app.py
-发票邮件筛选小工具 - 网站版主程序（Flask）。
+app.py
+发票邮件筛选小工具 - 网站版主程序（Flask），Zoho 原生搜索版。
 
-同事访问网站 -> 点"用 Zoho 登录"完成一次性授权 -> 点"连接 OneDrive"再授权一次 ->
-在页面上填筛选条件 -> 点"立即运行" -> 命中的发票附件自动传到各自的 OneDrive。
+同事访问网站 -> 点"用 Zoho 登录"完成一次性授权 -> 填几个筛选条件（主题包含 / 附件名包含 /
+发件人包含 / 发件人排除 / 日期 / 是否要求带附件）-> 点"立即运行"。这几个条件里，
+主题/附件名/发件人/日期/是否带附件会拼成 Zoho Mail 官方搜索语法交给 Zoho 服务端去搜
+（跟你在网页邮箱搜索框里用的是同一套语法）；"发件人排除"这个反向条件 Zoho 不支持，
+由这个网站自己在拿到结果后再筛一遍。
+
+命中的邮件会在页面上列成表格：发件人名、发件人邮箱、附件标题、下载链接，
+一行对应一个附件，点击就能单独下载；也可以导出成 Excel，或者把整次运行打包成 ZIP 下载。
 
 部署说明见 README_WEBSITE.md。
 """
@@ -23,7 +29,6 @@ load_dotenv()
 
 from models import db, User, ManifestEntry, ProcessedMessage, RunLog, RunStatus
 import oauth_zoho as zoho_oauth
-import oauth_microsoft as ms_oauth
 import crypto_util as token_crypto
 from mail_sync import run_sync_for_user, DOWNLOADS_ROOT
 
@@ -33,6 +38,13 @@ try:
     _CSRF_AVAILABLE = True
 except ImportError:
     _CSRF_AVAILABLE = False
+
+try:
+    from openpyxl import Workbook
+
+    _OPENPYXL_AVAILABLE = True
+except ImportError:
+    _OPENPYXL_AVAILABLE = False
 
 
 def _admin_emails():
@@ -57,9 +69,9 @@ def _sqlite_column_ddl(column):
 
 
 def _run_lightweight_migrations():
-    """SQLite 这边没接 Alembic，db.create_all() 只会建不存在的新表，不会给已经存在的老表加新列。
+    """SQLite/Postgres 都没接 Alembic，db.create_all() 只会建不存在的新表，不会给已经存在的老表加新列。
     这里自动比对 models.py 里声明的列和数据库里实际的列，缺什么自动 ALTER TABLE 补上，
-    这样以后再改字段就不用让大家手动删库、丢掉已经保存的处理记录了。"""
+    这样以后再改字段就不用手动删库、丢掉已经保存的处理记录了。"""
     inspector = inspect(db.engine)
     for model in (User, ProcessedMessage, ManifestEntry, RunLog, RunStatus):
         table = model.__table__
@@ -77,9 +89,8 @@ def _run_lightweight_migrations():
 
 
 def is_admin_user(user):
-    """本地保存功能会让人直接读写服务器磁盘，不能对所有登录的同事开放。
-    默认只有第一个注册（第一个用 Zoho 登录）的人算管理员；也可以用 ADMIN_EMAILS
-    环境变量（逗号分隔的邮箱）显式指定。"""
+    """默认只有第一个注册（第一个用 Zoho 登录）的人算管理员；也可以用 ADMIN_EMAILS
+    环境变量（逗号分隔的邮箱）显式指定。目前只用来控制谁能看 /admin/users 这个统计页面。"""
     if not user:
         return False
     configured = _admin_emails()
@@ -162,52 +173,21 @@ def _respond(message, ok=True, **extra):
     return redirect(url_for("dashboard"))
 
 
-RECORDS_PAGE_SIZE = 20
+RECORDS_PAGE_SIZE = 30
 
 
 def _query_manifest_page(user_id, page):
-    """处理记录按"邮件"(uid)分组、分页查询，供 dashboard 页面首次渲染和
-    /manifest 这个 AJAX 刷新接口共用，避免逻辑写两遍出现不一致。"""
+    """处理记录分页查询：一行 = 一个附件，按时间倒序，供 dashboard 页面首次渲染、
+    /manifest 这个 AJAX 刷新接口、以及 Excel 导出共用同一份查询逻辑。"""
     page = page if page and page >= 1 else 1
 
-    grouped_q = (
-        db.session.query(ManifestEntry.uid, func.max(ManifestEntry.created_at).label("latest"))
-        .filter(ManifestEntry.user_id == user_id)
-        .group_by(ManifestEntry.uid)
-        .order_by(func.max(ManifestEntry.created_at).desc())
-    )
-    total_emails = grouped_q.count()
-    total_pages = max(1, (total_emails + RECORDS_PAGE_SIZE - 1) // RECORDS_PAGE_SIZE)
+    q = ManifestEntry.query.filter_by(user_id=user_id).order_by(ManifestEntry.created_at.desc())
+    total = q.count()
+    total_pages = max(1, (total + RECORDS_PAGE_SIZE - 1) // RECORDS_PAGE_SIZE)
     page = min(page, total_pages)
-    page_uids = [
-        row.uid
-        for row in grouped_q.offset((page - 1) * RECORDS_PAGE_SIZE).limit(RECORDS_PAGE_SIZE).all()
-    ]
+    rows = q.offset((page - 1) * RECORDS_PAGE_SIZE).limit(RECORDS_PAGE_SIZE).all()
 
-    grouped_entries = []
-    if page_uids:
-        rows = ManifestEntry.query.filter(
-            ManifestEntry.user_id == user_id, ManifestEntry.uid.in_(page_uids)
-        ).all()
-        by_uid = {}
-        for e in rows:
-            by_uid.setdefault(e.uid, []).append(e)
-        for uid in page_uids:
-            items = sorted(by_uid.get(uid, []), key=lambda e: e.created_at)
-            if not items:
-                continue
-            first = items[0]
-            grouped_entries.append(
-                {
-                    "sender": first.sender,
-                    "subject": first.subject,
-                    "mail_date": first.mail_date,
-                    "created_at": max(e.created_at for e in items),
-                    "attachments": items,
-                }
-            )
-
-    return grouped_entries, page, total_pages, total_emails
+    return rows, page, total_pages, total
 
 
 def register_routes(app):
@@ -278,53 +258,6 @@ def register_routes(app):
         session.clear()
         return redirect(url_for("index"))
 
-    # ---------------- Microsoft / OneDrive 连接 ----------------
-
-    @app.route("/connect/microsoft")
-    def connect_microsoft():
-        if not current_user():
-            return redirect(url_for("index"))
-        state = secrets.token_hex(16)
-        session["ms_oauth_state"] = state
-        try:
-            return redirect(ms_oauth.build_authorize_url(state))
-        except RuntimeError as e:
-            flash(str(e))
-            return redirect(url_for("dashboard"))
-
-    @app.route("/auth/microsoft/callback")
-    def auth_microsoft_callback():
-        user = current_user()
-        if not user:
-            return redirect(url_for("index"))
-
-        error = request.args.get("error")
-        if error:
-            flash(f"OneDrive 授权失败：{error}")
-            return redirect(url_for("dashboard"))
-
-        state = request.args.get("state")
-        if not state or state != session.get("ms_oauth_state"):
-            flash("授权状态校验失败，请重新连接。")
-            return redirect(url_for("dashboard"))
-
-        code = request.args.get("code")
-        try:
-            token_resp = ms_oauth.exchange_code_for_token(code)
-        except Exception as e:
-            flash(f"OneDrive 授权处理失败：{e}")
-            return redirect(url_for("dashboard"))
-
-        new_ms_refresh_token = token_resp.get("refresh_token")
-        if new_ms_refresh_token:
-            user.ms_refresh_token = token_crypto.encrypt(new_ms_refresh_token)
-        account = token_resp.get("id_token_claims", {})
-        user.ms_account_name = account.get("preferred_username") or account.get("name")
-        db.session.commit()
-
-        flash("OneDrive 连接成功。")
-        return redirect(url_for("dashboard"))
-
     # ---------------- 仪表盘 / 配置 / 运行 ----------------
 
     @app.route("/dashboard")
@@ -333,21 +266,19 @@ def register_routes(app):
         if not user:
             return redirect(url_for("index"))
 
-        # 处理记录按"邮件"(uid)分组显示：同一封邮件命中多个附件时合并成一行，
-        # 并支持分页，能翻到本次运行/以前所有运行产生的全部记录，不再只截前 50 条。
         page = request.args.get("page", 1, type=int) or 1
-        grouped_entries, page, total_pages, total_emails = _query_manifest_page(user.id, page)
+        rows, page, total_pages, total_entries = _query_manifest_page(user.id, page)
 
         status = RunStatus.query.get(user.id)
         return render_template(
             "dashboard.html",
             user=user,
-            entries=grouped_entries,
+            entries=rows,
             status=status,
             is_admin=is_admin_user(user),
             page=page,
             total_pages=total_pages,
-            total_emails=total_emails,
+            total_entries=total_entries,
         )
 
     @app.route("/admin/users")
@@ -389,31 +320,18 @@ def register_routes(app):
             return jsonify({"error": "not logged in"}), 401
 
         page = request.args.get("page", 1, type=int) or 1
-        grouped_entries, page, total_pages, total_emails = _query_manifest_page(user.id, page)
-
-        def _attachment_json(a):
-            # 跟 dashboard.html 里那段 Jinja 逻辑保持一致：onedrive_link 这个字段是老功能
-            # （OneDrive 直传/保存到服务器本地路径）留下的，现在新记录基本都是"打包下载"模式，
-            # 但历史记录可能还是 http 链接或者本地绝对路径，这里原样区分展示。
-            link = a.onedrive_link
-            if link and link.startswith("http"):
-                return {"filename": a.original_filename, "kind": "link", "href": link}
-            if link and link != a.original_filename:
-                return {"filename": a.original_filename, "kind": "path", "path": link}
-            return {
-                "filename": a.original_filename,
-                "kind": "download",
-                "download_url": url_for("download_run", run_id=a.run_id) if a.run_id else None,
-            }
+        rows, page, total_pages, total_entries = _query_manifest_page(user.id, page)
 
         entries_json = [
             {
-                "sender": e["sender"],
-                "subject": e["subject"],
-                "created_at": e["created_at"].strftime("%Y-%m-%d %H:%M") if e["created_at"] else "",
-                "attachments": [_attachment_json(a) for a in e["attachments"]],
+                "created_at": e.created_at.strftime("%Y-%m-%d %H:%M") if e.created_at else "",
+                "sender_name": e.sender_name,
+                "sender_email": e.sender_email,
+                "subject": e.subject,
+                "filename": e.original_filename,
+                "download_url": url_for("download_attachment", entry_id=e.id),
             }
-            for e in grouped_entries
+            for e in rows
         ]
 
         return jsonify(
@@ -421,7 +339,7 @@ def register_routes(app):
                 "entries": entries_json,
                 "page": page,
                 "total_pages": total_pages,
-                "total_emails": total_emails,
+                "total_entries": total_entries,
             }
         )
 
@@ -431,23 +349,13 @@ def register_routes(app):
         if not user:
             return redirect(url_for("index"))
 
-        user.keywords = request.form.get("keywords", "")
-        user.sender_domains = request.form.get("sender_domains", "")
-        user.specific_senders = request.form.get("specific_senders", "")
-        user.require_attachment_for_keyword_match = bool(request.form.get("require_attachment"))
-        user.since_date = request.form.get("since_date", "").strip()
-        user.attachment_name_filter = request.form.get("attachment_name_filter", "")
-
-        user.precise_mode = bool(request.form.get("precise_mode"))
-        user.precise_subject = request.form.get("precise_subject", "")
-        user.precise_sender = request.form.get("precise_sender", "")
-        user.precise_attachment = request.form.get("precise_attachment", "")
-
-        user.onedrive_folder = request.form.get("onedrive_folder", "INVOICE-SORTING-RESULT").strip() or "INVOICE-SORTING-RESULT"
-
-        # 投递方式现在只保留"打包下载 ZIP"，OneDrive 还在调试、本地路径只适合单机自跑，
-        # 都不再通过界面暴露，这里直接固定成 download，不再接受表单传来的值。
-        user.sync_target = "download"
+        user.search_subject_contains = request.form.get("search_subject_contains", "")
+        user.search_attachment_contains = request.form.get("search_attachment_contains", "")
+        user.search_sender_contains = request.form.get("search_sender_contains", "")
+        user.search_content_contains = request.form.get("search_content_contains", "")
+        user.search_sender_excludes = request.form.get("search_sender_excludes", "")
+        user.search_since_date = request.form.get("search_since_date", "").strip()
+        user.search_require_attachment = bool(request.form.get("search_require_attachment"))
 
         db.session.commit()
         return _respond("配置已保存。")
@@ -468,6 +376,26 @@ def register_routes(app):
 
         return _respond("已开始运行，下面的日志会自动刷新。")
 
+    @app.route("/download_attachment/<int:entry_id>")
+    def download_attachment(entry_id):
+        """单独下载某一个附件（表格里每一行的下载链接对应这个路由）。"""
+        user = current_user()
+        if not user:
+            return redirect(url_for("index"))
+
+        entry = ManifestEntry.query.filter_by(id=entry_id, user_id=user.id).first()
+        if not entry:
+            flash("找不到这个附件记录，可能已经被清空了。")
+            return redirect(url_for("dashboard"))
+
+        folder = os.path.join(DOWNLOADS_ROOT, str(user.id), entry.run_id or "")
+        filepath = os.path.join(folder, entry.saved_filename or "")
+        if not entry.saved_filename or not os.path.isfile(filepath):
+            flash("这个附件的文件已经不在服务器上了（临时文件可能已被清理），建议重新运行一次。")
+            return redirect(url_for("dashboard"))
+
+        return send_file(filepath, as_attachment=True, download_name=entry.original_filename or "attachment")
+
     @app.route("/download/<run_id>")
     def download_run(run_id):
         """把某一次运行命中的附件打包成 ZIP，走浏览器正常下载流程发给用户 ——
@@ -483,7 +411,7 @@ def register_routes(app):
 
         folder = os.path.join(DOWNLOADS_ROOT, str(user.id), run_id)
         if not os.path.isdir(folder) or not os.listdir(folder):
-            flash("这次运行的文件已经不在服务器上了（可能是投递方式不是「打包下载」，或者临时文件已被清理），建议重新运行一次。")
+            flash("这次运行的文件已经不在服务器上了（临时文件可能已被清理），建议重新运行一次。")
             return redirect(url_for("dashboard"))
 
         buf = io.BytesIO()
@@ -499,6 +427,54 @@ def register_routes(app):
             mimetype="application/zip",
             as_attachment=True,
             download_name=f"invoices_{run_id}.zip",
+        )
+
+    @app.route("/export_excel")
+    def export_excel():
+        """把当前所有处理记录导出成一份 Excel：时间/发件人名/发件人邮箱/主题/附件标题/下载链接。
+        注意下载链接需要登录同一个网站才能打开，而且服务器上的临时文件超过 3 天会被自动清理，
+        建议导出后尽快把需要的附件下载下来，不要把这份 Excel 当长期归档用。"""
+        user = current_user()
+        if not user:
+            return redirect(url_for("index"))
+        if not _OPENPYXL_AVAILABLE:
+            flash("服务器还没装 openpyxl，导出不了 Excel。请执行 pip install -r requirements.txt 后重启。")
+            return redirect(url_for("dashboard"))
+
+        rows = ManifestEntry.query.filter_by(user_id=user.id).order_by(ManifestEntry.created_at.desc()).all()
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "处理记录"
+        ws.append(["时间", "发件人名", "发件人邮箱", "主题", "附件标题", "下载链接"])
+        for e in rows:
+            link = url_for("download_attachment", entry_id=e.id, _external=True)
+            ws.append(
+                [
+                    e.created_at.strftime("%Y-%m-%d %H:%M") if e.created_at else "",
+                    e.sender_name or "",
+                    e.sender_email or "",
+                    e.subject or "",
+                    e.original_filename or "",
+                    link,
+                ]
+            )
+            cell = ws.cell(row=ws.max_row, column=6)
+            cell.hyperlink = link
+            cell.style = "Hyperlink"
+
+        for col, width in zip("ABCDEF", (16, 22, 28, 34, 34, 46)):
+            ws.column_dimensions[col].width = width
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+
+        return send_file(
+            buf,
+            as_attachment=True,
+            download_name="处理记录.xlsx",
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
     @app.route("/stop", methods=["POST"])
@@ -532,7 +508,7 @@ def register_routes(app):
     def clear_manifest():
         """清空页面底部那个可见的"处理记录"表格（ManifestEntry，已保存附件的溯源历史），
         跟"清空处理记录"是两码事——那个清的是内部去重用的 ProcessedMessage，不影响这张表。
-        这个操作会导致对应的"下载本次结果"链接跟着失效（数据库记录没了，/download 路由查不到）。"""
+        这个操作会导致对应的下载链接跟着失效（数据库记录没了，下载路由查不到）。"""
         user = current_user()
         if not user:
             return redirect(url_for("index"))
@@ -543,7 +519,7 @@ def register_routes(app):
 
         deleted = ManifestEntry.query.filter_by(user_id=user.id).delete()
         db.session.commit()
-        return _respond(f"已清空附件历史（{deleted} 条）。之前运行生成的下载链接会跟着失效，不影响下次是否重新扫描邮件。")
+        return _respond(f"已清空附件历史（{deleted} 条）。之前的下载链接会跟着失效，不影响下次是否重新扫描邮件。")
 
     @app.route("/run/status")
     def run_status():
@@ -566,7 +542,7 @@ def register_routes(app):
             logs = [r.message for r in rows]
 
         download_url = None
-        if run_id and user.sync_target == "download" and (status.saved_count if status else 0):
+        if run_id and (status.saved_count if status else 0):
             download_url = url_for("download_run", run_id=run_id)
 
         return jsonify(
