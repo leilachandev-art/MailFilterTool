@@ -30,6 +30,7 @@ load_dotenv()
 from models import db, User, ManifestEntry, ProcessedMessage, RunLog, RunStatus
 import oauth_zoho as zoho_oauth
 import crypto_util as token_crypto
+import ai_extract
 from mail_sync import run_sync_for_user, DOWNLOADS_ROOT
 
 try:
@@ -41,10 +42,16 @@ except ImportError:
 
 try:
     from openpyxl import Workbook
+    from openpyxl.utils import get_column_letter
 
     _OPENPYXL_AVAILABLE = True
 except ImportError:
     _OPENPYXL_AVAILABLE = False
+
+
+def _split_fields(text_value):
+    """把用户填的"发票号, 金额, 币种"这种逗号分隔的字段名拆成列表，去空白、去空项。"""
+    return [t.strip() for t in (text_value or "").split(",") if t.strip()]
 
 
 def _admin_emails():
@@ -279,6 +286,8 @@ def register_routes(app):
             page=page,
             total_pages=total_pages,
             total_entries=total_entries,
+            extract_field_names=_split_fields(user.extract_fields),
+            ai_problem=ai_extract.diagnose(),
         )
 
     @app.route("/admin/users")
@@ -321,6 +330,7 @@ def register_routes(app):
 
         page = request.args.get("page", 1, type=int) or 1
         rows, page, total_pages, total_entries = _query_manifest_page(user.id, page)
+        field_names = _split_fields(user.extract_fields)
 
         entries_json = [
             {
@@ -329,7 +339,8 @@ def register_routes(app):
                 "sender_email": e.sender_email,
                 "subject": e.subject,
                 "filename": e.original_filename,
-                "download_url": url_for("download_attachment", entry_id=e.id),
+                "download_url": url_for("download_attachment", entry_id=e.id) if e.saved_filename else None,
+                "fields": [e.extracted_fields.get(name) for name in field_names],
             }
             for e in rows
         ]
@@ -337,6 +348,7 @@ def register_routes(app):
         return jsonify(
             {
                 "entries": entries_json,
+                "field_names": field_names,
                 "page": page,
                 "total_pages": total_pages,
                 "total_entries": total_entries,
@@ -356,6 +368,7 @@ def register_routes(app):
         user.search_sender_excludes = request.form.get("search_sender_excludes", "")
         user.search_since_date = request.form.get("search_since_date", "").strip()
         user.search_require_attachment = bool(request.form.get("search_require_attachment"))
+        user.extract_fields = request.form.get("extract_fields", "")
 
         db.session.commit()
         return _respond("配置已保存。")
@@ -375,6 +388,27 @@ def register_routes(app):
         thread.start()
 
         return _respond("已开始运行，下面的日志会自动刷新。")
+
+    @app.route("/run_titles_only", methods=["POST"])
+    def run_titles_only():
+        """只搜索、不下载附件的快速模式：命中的邮件同样会记进处理记录（标题/发件人/日期），
+        但跳过附件元数据查询和下载这两步，命中几百封邮件也是秒级完成，适合只是想要
+        批量导出邮件标题去做后续处理（比如从标题解析 container 号）的场景。"""
+        user = current_user()
+        if not user:
+            return redirect(url_for("index"))
+
+        status = RunStatus.query.get(user.id)
+        if status and status.is_running:
+            return _respond("已经有一个任务在运行了，请等它跑完。", ok=False)
+
+        app = current_app_ref["app"]
+        thread = threading.Thread(
+            target=run_sync_for_user, args=(app, user.id), kwargs={"download_attachments": False}, daemon=True
+        )
+        thread.start()
+
+        return _respond("已开始运行（仅导出标题模式，不下载附件），下面的日志会自动刷新。")
 
     @app.route("/download_attachment/<int:entry_id>")
     def download_attachment(entry_id):
@@ -431,7 +465,12 @@ def register_routes(app):
 
     @app.route("/export_excel")
     def export_excel():
-        """把当前所有处理记录导出成一份 Excel：时间/发件人名/发件人邮箱/主题/附件标题/下载链接。
+        """把当前所有处理记录导出成一份 Excel：时间/发件人名/发件人邮箱/主题/附件标题/下载链接，
+        后面再跟着你在"筛选条件"里配置的那几个 AI 提取字段（比如 金额/币种/container号，
+        字段名和列顺序跟当前 extract_fields 配置一致）。一封命中的邮件不管有没有附件都会有
+        一行，没有附件的行"附件标题"和"下载链接"留空——这样批量导出邮件标题不用依赖邮件
+        必须带附件。AI 提取的这几列拿不准时会留空，不是每一行都有，建议当作辅助参考，
+        重要数字自己核对一下原始附件。
         注意下载链接需要登录同一个网站才能打开，而且服务器上的临时文件超过 3 天会被自动清理，
         建议导出后尽快把需要的附件下载下来，不要把这份 Excel 当长期归档用。"""
         user = current_user()
@@ -442,13 +481,19 @@ def register_routes(app):
             return redirect(url_for("dashboard"))
 
         rows = ManifestEntry.query.filter_by(user_id=user.id).order_by(ManifestEntry.created_at.desc()).all()
+        field_names = _split_fields(user.extract_fields)
+
+        fixed_headers = ["时间", "发件人名", "发件人邮箱", "主题", "附件标题", "下载链接"]
+        headers = fixed_headers + [f"{name}(AI提取)" for name in field_names]
+        link_col = fixed_headers.index("下载链接") + 1
 
         wb = Workbook()
         ws = wb.active
         ws.title = "处理记录"
-        ws.append(["时间", "发件人名", "发件人邮箱", "主题", "附件标题", "下载链接"])
+        ws.append(headers)
         for e in rows:
-            link = url_for("download_attachment", entry_id=e.id, _external=True)
+            link = url_for("download_attachment", entry_id=e.id, _external=True) if e.saved_filename else ""
+            fields = e.extracted_fields
             ws.append(
                 [
                     e.created_at.strftime("%Y-%m-%d %H:%M") if e.created_at else "",
@@ -458,13 +503,17 @@ def register_routes(app):
                     e.original_filename or "",
                     link,
                 ]
+                + [fields.get(name) or "" for name in field_names]
             )
-            cell = ws.cell(row=ws.max_row, column=6)
-            cell.hyperlink = link
-            cell.style = "Hyperlink"
+            if link:
+                cell = ws.cell(row=ws.max_row, column=link_col)
+                cell.hyperlink = link
+                cell.style = "Hyperlink"
 
-        for col, width in zip("ABCDEF", (16, 22, 28, 34, 34, 46)):
-            ws.column_dimensions[col].width = width
+        fixed_widths = [16, 22, 28, 34, 34, 46]
+        widths = fixed_widths + [18] * len(field_names)
+        for i, width in enumerate(widths, start=1):
+            ws.column_dimensions[get_column_letter(i)].width = width
 
         buf = io.BytesIO()
         wb.save(buf)
@@ -550,6 +599,7 @@ def register_routes(app):
                 "is_running": is_running,
                 "logs": logs,
                 "checked": status.checked_count if status else 0,
+                "matched": status.matched_count if status else 0,
                 "saved": status.saved_count if status else 0,
                 "download_url": download_url,
             }

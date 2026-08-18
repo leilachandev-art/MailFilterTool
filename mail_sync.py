@@ -20,6 +20,7 @@ import oauth_zoho as zoho_oauth
 import zoho_mail_api as zmail
 import zoho_search_api as zsearch
 import crypto_util as token_crypto
+import ai_extract
 from models import db, User, ProcessedMessage, ManifestEntry, RunLog, RunStatus
 
 PAGE_SIZE = 200
@@ -88,7 +89,10 @@ def log(app, user_id, run_id, message):
         db.session.commit()
 
 
-def run_sync_for_user(app, user_id, run_id=None):
+def run_sync_for_user(app, user_id, run_id=None, download_attachments=True):
+    """download_attachments=False 时是"仅导出标题"快速模式：跳过附件元数据查询和下载，
+    只用 Zoho 搜索结果本身自带的 subject/sender/date 记录，命中多少邮件几乎是秒级的，
+    适合只是想要批量拿邮件标题（比如从标题里解析 container 号）去做后续处理的场景。"""
     run_id = run_id or uuid.uuid4().hex[:12]
 
     try:
@@ -104,9 +108,10 @@ def run_sync_for_user(app, user_id, run_id=None):
             status.stop_requested = False
             status.checked_count = 0
             status.saved_count = 0
+            status.matched_count = 0
             db.session.commit()
 
-        _do_sync(app, user_id, run_id)
+        _do_sync(app, user_id, run_id, download_attachments=download_attachments)
     except Exception as e:
         log(app, user_id, run_id, f"[出错] 任务异常终止：{e}")
     finally:
@@ -124,13 +129,14 @@ def _stop_requested(user_id):
     return bool(status and status.stop_requested)
 
 
-def _do_sync(app, user_id, run_id):
+def _do_sync(app, user_id, run_id, download_attachments=True):
     with app.app_context():
         user = User.query.get(user_id)
         if not user:
             return
 
-        _cleanup_old_downloads(user_id)
+        if download_attachments:
+            _cleanup_old_downloads(user_id)
 
         # ---- 刷新 Zoho token ----
         log(app, user_id, run_id, "正在刷新 Zoho 登录状态 ...")
@@ -167,9 +173,17 @@ def _do_sync(app, user_id, run_id):
         log(app, user_id, run_id, f"用 Zoho 搜索条件：{search_key}")
 
         exclude_terms = _split(user.search_sender_excludes)
+        extract_field_names = _split(user.extract_fields)
+        if download_attachments and extract_field_names:
+            ai_problem = ai_extract.diagnose()
+            if ai_problem:
+                log(app, user_id, run_id, f"[提示] AI 提取字段这个功能现在用不了：{ai_problem}")
+            else:
+                log(app, user_id, run_id, f"下载 PDF 附件时会用 AI 提取这些字段：{'、'.join(extract_field_names)}")
 
         download_dir = os.path.join(DOWNLOADS_ROOT, str(user_id), run_id)
-        os.makedirs(download_dir, exist_ok=True)
+        if download_attachments:
+            os.makedirs(download_dir, exist_ok=True)
 
         processed_uids = {
             row.uid for row in ProcessedMessage.query.filter_by(user_id=user.id).all()
@@ -178,6 +192,8 @@ def _do_sync(app, user_id, run_id):
         status = RunStatus.query.get(user_id)
 
         new_saved = 0
+        new_matched = 0
+        matched_with_attachment_flag = 0
         skipped = 0
         excluded = 0
         checked = 0
@@ -235,33 +251,72 @@ def _do_sync(app, user_id, run_id):
                     msg_folder_id = str(msg.get("folderId", ""))
                     mail_date = msg.get("sentDateInGMT", "")
                     attach = str(msg.get("hasAttachment", "0")) in ("1", "true", "True")
+                    if attach:
+                        matched_with_attachment_flag += 1
 
                     attachments = []
-                    if attach and msg_folder_id:
+                    # "仅导出标题"模式（download_attachments=False）不查附件元数据、不下载，
+                    # 直接跳到下面 else 分支只记标题，这样每封邮件不用多等一轮 API 调用，快很多。
+                    if download_attachments and attach and msg_folder_id:
                         attachments = zmail.get_attachment_info(
                             access_token, user.zoho_api_domain, user.zoho_account_id, msg_folder_id, message_id
                         )
 
-                    for a in attachments:
-                        filename = safe_filename(a.get("attachmentName", "attachment"))
-                        content = zmail.download_attachment(
-                            access_token, user.zoho_api_domain, user.zoho_account_id,
-                            msg_folder_id, message_id, a.get("attachmentId"),
-                        )
+                    if attachments:
+                        # 有附件：每个附件各生成一行，附带下载/保存信息。
+                        for a in attachments:
+                            filename = safe_filename(a.get("attachmentName", "attachment"))
+                            content = zmail.download_attachment(
+                                access_token, user.zoho_api_domain, user.zoho_account_id,
+                                msg_folder_id, message_id, a.get("attachmentId"),
+                            )
 
-                        saved_path = _save_local(download_dir, filename, content)
-                        saved_filename = os.path.basename(saved_path)
+                            saved_path = _save_local(download_dir, filename, content)
+                            saved_filename = os.path.basename(saved_path)
 
-                        new_saved += 1
-                        if status:
-                            status.saved_count = new_saved
-                        db.session.add(
-                            ManifestEntry(
+                            # 只对 PDF 附件调用 AI 按用户自定义的字段名提取；没配置好的话
+                            # extract_fields_from_pdf 会带着具体原因回来，记进日志方便排查，
+                            # 不管提取成不成功都不影响附件本身已经下载成功这件事。
+                            extracted_fields = {}
+                            if filename.lower().endswith(".pdf") and extract_field_names:
+                                extracted_fields, extract_error = ai_extract.extract_fields_from_pdf(
+                                    content, extract_field_names
+                                )
+                                if extract_error:
+                                    log(app, user_id, run_id, f"[提示] 附件 {filename} AI 提取没成功（附件本身已正常下载）：{extract_error}")
+
+                            new_saved += 1
+                            new_matched += 1
+                            if status:
+                                status.saved_count = new_saved
+                                status.matched_count = new_matched
+                            entry = ManifestEntry(
                                 user_id=user.id,
                                 run_id=run_id,
                                 uid=message_id,
                                 original_filename=filename,
                                 saved_filename=saved_filename,
+                                sender_name=sender_name,
+                                sender_email=sender_email,
+                                subject=subject,
+                                mail_date=mail_date,
+                                message_id=message_id,
+                            )
+                            entry.extracted_fields = extracted_fields
+                            db.session.add(entry)
+                    else:
+                        # 没有附件：也要记一行，只填标题/发件人/日期，方便批量导出邮件标题
+                        # 到 Excel 做后续处理（比如从标题里解析 container 号）。
+                        new_matched += 1
+                        if status:
+                            status.matched_count = new_matched
+                        db.session.add(
+                            ManifestEntry(
+                                user_id=user.id,
+                                run_id=run_id,
+                                uid=message_id,
+                                original_filename=None,
+                                saved_filename=None,
                                 sender_name=sender_name,
                                 sender_email=sender_email,
                                 subject=subject,
@@ -284,6 +339,9 @@ def _do_sync(app, user_id, run_id):
             if len(messages) < PAGE_SIZE:
                 break  # 最后一页了
 
-        log(app, user_id, run_id, f"完成：检查了 {checked} 封搜索结果，排除 {excluded} 封（命中发件人排除词），保存 {new_saved} 个附件")
+        if download_attachments:
+            log(app, user_id, run_id, f"完成：检查了 {checked} 封搜索结果，排除 {excluded} 封（命中发件人排除词），命中 {new_matched} 封邮件，其中下载附件 {new_saved} 个")
+        else:
+            log(app, user_id, run_id, f"完成（仅导出标题模式，未下载附件）：检查了 {checked} 封搜索结果，排除 {excluded} 封（命中发件人排除词），命中 {new_matched} 封邮件，其中 {matched_with_attachment_flag} 封本身带附件（未下载）")
         if skipped:
             log(app, user_id, run_id, f"有 {skipped} 封邮件处理失败被跳过（下次运行会重试）")

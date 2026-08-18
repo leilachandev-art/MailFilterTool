@@ -5,10 +5,13 @@ models.py
 另外存已处理邮件记录（去重用）、投递清单（附件溯源信息 + 下载）、运行日志。
 """
 
+import json
 from datetime import datetime
 from flask_sqlalchemy import SQLAlchemy
 
 db = SQLAlchemy()
+
+DEFAULT_EXTRACT_FIELDS = "金额, 币种, container号"
 
 
 class User(db.Model):
@@ -35,7 +38,14 @@ class User(db.Model):
     search_sender_excludes = db.Column(db.Text, default="")
 
     search_since_date = db.Column(db.String(20), default="")  # YYYY-MM-DD，对应 Zoho 的 fromDate
-    search_require_attachment = db.Column(db.Boolean, default=True)  # 对应 Zoho 的 has:attachment
+    # 对应 Zoho 的 has:attachment。这个工具默认不要求带附件——很多时候只是想批量导出符合
+    # 条件的邮件标题（比如按发件人域名筛某个供应商的所有邮件），不管有没有附件都要看到。
+    search_require_attachment = db.Column(db.Boolean, default=False)
+
+    # ---- AI 提取字段配置：跟 imagetotable.ai 一样"自己定义想要哪几列"，逗号分隔，
+    # 比如"发票号, 金额, 币种, container号"。下载 PDF 附件时会调用 Claude 按这几个
+    # 字段名去读文档内容提取，不是关键词/表格正则匹配，排版差异大的发票也能读懂。----
+    extract_fields = db.Column(db.Text, default=DEFAULT_EXTRACT_FIELDS)
 
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
@@ -55,7 +65,9 @@ class ProcessedMessage(db.Model):
 
 
 class ManifestEntry(db.Model):
-    """命中的附件清单：一行 = 一个附件，用来在网页表格 / Excel 导出里清晰展示溯源信息。"""
+    """命中筛选条件的邮件清单：一封邮件如果有附件，每个附件各一行；如果没有附件，
+    也会生成一行(original_filename/saved_filename 留空)，保证邮件标题不会因为没有附件而漏掉，
+    方便批量导出标题到 Excel 做后续处理。"""
 
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False, index=True)
@@ -71,6 +83,25 @@ class ManifestEntry(db.Model):
     mail_date = db.Column(db.String(200))
     message_id = db.Column(db.String(500))
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    # ---- 用 AI(Claude) 从 PDF 附件里按用户自定义字段名提取出来的信息 ----
+    # 存成 JSON 字符串，比如 {"金额": "310.00", "币种": "CAD", "container号": "EMCU1561467"}，
+    # key 是提取时 user.extract_fields 里的字段名。用 extracted_fields 这个 property 读取，
+    # 不要直接读 extracted_fields_json。拿不准的字段值是 None，不会瞎填。
+    extracted_fields_json = db.Column(db.Text, nullable=True)
+
+    @property
+    def extracted_fields(self):
+        if not self.extracted_fields_json:
+            return {}
+        try:
+            return json.loads(self.extracted_fields_json)
+        except (ValueError, TypeError):
+            return {}
+
+    @extracted_fields.setter
+    def extracted_fields(self, value):
+        self.extracted_fields_json = json.dumps(value or {}, ensure_ascii=False)
 
 
 class RunLog(db.Model):
@@ -91,4 +122,5 @@ class RunStatus(db.Model):
     current_run_id = db.Column(db.String(64), nullable=True)
     stop_requested = db.Column(db.Boolean, default=False)
     checked_count = db.Column(db.Integer, default=0)
-    saved_count = db.Column(db.Integer, default=0)
+    saved_count = db.Column(db.Integer, default=0)  # 已下载的附件数
+    matched_count = db.Column(db.Integer, default=0)  # 命中筛选条件的邮件数(不管有没有附件)

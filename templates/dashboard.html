@@ -96,8 +96,14 @@
 
         <div class="checkbox-row" style="margin-top:14px;">
           <input type="checkbox" id="search_require_attachment" name="search_require_attachment" {% if user.search_require_attachment %}checked{% endif %}>
-          <label for="search_require_attachment" style="margin:0;">只看带附件的邮件（推荐勾选）</label>
+          <label for="search_require_attachment" style="margin:0;">只看带附件的邮件（不勾选的话，没附件的邮件也会记录标题，方便批量导出）</label>
         </div>
+
+        <label title="下载 PDF 附件时会调用 AI 按这几个字段名去读文档内容提取，不是关键词/表格匹配，排版差异大的发票也能读懂；拿不准的值会留空，不瞎猜。">AI 从附件里提取哪些字段</label>
+        <input type="text" name="extract_fields" value="{{ user.extract_fields }}" placeholder="金额, 币种, container号">
+        {% if ai_problem %}
+        <p class="hint" style="color:#b3261e;">⚠ 暂时用不了：{{ ai_problem }}</p>
+        {% endif %}
 
         <div style="margin-top: 18px;">
           <button class="btn" type="submit">保存配置</button>
@@ -110,7 +116,13 @@
       <form method="post" action="{{ url_for('run_now') }}" id="run-form" style="display:inline;">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <button class="btn" type="submit" id="run-btn" {% if status and status.is_running %}disabled{% endif %}>
-          {% if status and status.is_running %}运行中...{% else %}立即运行{% endif %}
+          {% if status and status.is_running %}运行中...{% else %}立即运行（含下载附件）{% endif %}
+        </button>
+      </form>
+      <form method="post" action="{{ url_for('run_titles_only') }}" id="run-titles-form" style="display:inline; margin-left:8px;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button class="btn btn-secondary" type="submit" id="run-titles-btn" {% if status and status.is_running %}disabled{% endif %} title="只搜索、不下载附件，命中几百封邮件也是秒级完成，适合只想批量拿邮件标题的场景">
+          {% if status and status.is_running %}运行中...{% else %}仅导出标题（不下载附件，更快）{% endif %}
         </button>
       </form>
       <form method="post" action="{{ url_for('stop_run') }}" id="stop-form" style="display:inline; margin-left:8px;">
@@ -135,7 +147,7 @@
 
       <div id="progress-line" style="display:none; margin-top:14px; font-size:13px; color:#333;">
         <span class="spinner">●</span>
-        已检查 <b id="progress-checked">0</b> 封邮件，已保存 <b id="progress-saved">0</b> 个附件
+        已检查 <b id="progress-checked">0</b> 封邮件，命中 <b id="progress-matched">0</b> 封，已下载附件 <b id="progress-saved">0</b> 个
       </div>
       <div id="download-ready" style="display:none; margin-top:12px;">
         <a class="btn" id="download-link" href="#">下载本次结果（ZIP）</a>
@@ -144,14 +156,17 @@
     </div>
 
     <div class="card">
-      <h2>处理记录 <span id="manifest-count">{% if total_entries %}<span style="font-weight:400; color:#888; font-size:13px;">（共 {{ total_entries }} 个附件）</span>{% endif %}</span></h2>
+      <h2>处理记录 <span id="manifest-count">{% if total_entries %}<span style="font-weight:400; color:#888; font-size:13px;">（共 {{ total_entries }} 条，含无附件的邮件）</span>{% endif %}</span></h2>
       <div style="margin-bottom:12px;">
         <a class="btn btn-secondary" href="{{ url_for('export_excel') }}">导出 Excel</a>
-        <span class="hint" style="display:inline; margin-left:6px;">导出的下载链接需要登录同一个网站才能打开，服务器临时文件 3 天后会被清理，建议尽快下载，不要当长期归档用。</span>
+        <span class="hint" style="display:inline; margin-left:6px;">导出的下载链接需要登录同一个网站才能打开，服务器临时文件 3 天后会被清理，建议尽快下载，不要当长期归档用。AI 提取的那几列拿不准会留空，仅供参考，重要数字建议核对原附件。</span>
       </div>
       <table>
         <thead>
-          <tr><th>时间</th><th>发件人名</th><th>发件人邮箱</th><th>主题</th><th>附件标题</th></tr>
+          <tr>
+            <th>时间</th><th>发件人名</th><th>发件人邮箱</th><th>主题</th><th>附件标题</th>
+            {% for name in extract_field_names %}<th>{{ name }}</th>{% endfor %}
+          </tr>
         </thead>
         <tbody id="manifest-tbody">
           {% for e in entries %}
@@ -160,10 +175,16 @@
             <td>{{ e.sender_name }}</td>
             <td>{{ e.sender_email }}</td>
             <td>{{ e.subject }}</td>
+            {% if e.saved_filename %}
             <td><a class="link" href="{{ url_for('download_attachment', entry_id=e.id) }}">{{ e.original_filename }}</a></td>
+            {% else %}
+            <td style="color:#999;">（无附件）</td>
+            {% endif %}
+            {% set fields = e.extracted_fields %}
+            {% for name in extract_field_names %}<td>{{ fields.get(name) or '' }}</td>{% endfor %}
           </tr>
           {% else %}
-          <tr><td colspan="5" style="color:#999;">还没有记录</td></tr>
+          <tr><td colspan="{{ 5 + extract_field_names|length }}" style="color:#999;">还没有记录</td></tr>
           {% endfor %}
         </tbody>
       </table>
@@ -221,11 +242,13 @@
 
     const logBox = document.getElementById('log-box');
     const runBtn = document.getElementById('run-btn');
+    const runTitlesBtn = document.getElementById('run-titles-btn');
     const stopBtn = document.getElementById('stop-btn');
     const clearBtn = document.getElementById('clear-btn');
     const clearManifestBtn = document.getElementById('clear-manifest-btn');
     const progressLine = document.getElementById('progress-line');
     const progressChecked = document.getElementById('progress-checked');
+    const progressMatched = document.getElementById('progress-matched');
     const progressSaved = document.getElementById('progress-saved');
     const downloadReady = document.getElementById('download-ready');
     const downloadLink = document.getElementById('download-link');
@@ -247,19 +270,24 @@
     function renderManifest(data) {
       currentManifestPage = data.page;
       manifestCount.innerHTML = data.total_entries
-        ? `<span style="font-weight:400; color:#888; font-size:13px;">（共 ${data.total_entries} 个附件）</span>`
+        ? `<span style="font-weight:400; color:#888; font-size:13px;">（共 ${data.total_entries} 条，含无附件的邮件）</span>`
         : '';
 
+      const fieldCount = (data.field_names || []).length;
       if (!data.entries.length) {
-        manifestTbody.innerHTML = '<tr><td colspan="5" style="color:#999;">还没有记录</td></tr>';
+        manifestTbody.innerHTML = `<tr><td colspan="${5 + fieldCount}" style="color:#999;">还没有记录</td></tr>`;
       } else {
-        manifestTbody.innerHTML = data.entries.map(e => `<tr>
+        manifestTbody.innerHTML = data.entries.map(e => {
+          const fieldCells = (e.fields || []).map(v => `<td>${escapeHtml(v)}</td>`).join('');
+          return `<tr>
             <td style="white-space:nowrap;">${escapeHtml(e.created_at)}</td>
             <td>${escapeHtml(e.sender_name)}</td>
             <td>${escapeHtml(e.sender_email)}</td>
             <td>${escapeHtml(e.subject)}</td>
-            <td><a class="link" href="${e.download_url}">${escapeHtml(e.filename)}</a></td>
-          </tr>`).join('');
+            <td>${e.download_url ? `<a class="link" href="${e.download_url}">${escapeHtml(e.filename)}</a>` : '<span style="color:#999;">（无附件）</span>'}</td>
+            ${fieldCells}
+          </tr>`;
+        }).join('');
       }
 
       if (data.total_pages > 1) {
@@ -292,10 +320,13 @@
             logBox.scrollTop = logBox.scrollHeight;
           }
           progressChecked.textContent = data.checked || 0;
+          progressMatched.textContent = data.matched || 0;
           progressSaved.textContent = data.saved || 0;
           if (data.is_running) {
             runBtn.disabled = true;
             runBtn.textContent = "运行中...";
+            runTitlesBtn.disabled = true;
+            runTitlesBtn.textContent = "运行中...";
             stopBtn.classList.remove('inactive');
             clearBtn.disabled = true;
             clearManifestBtn.disabled = true;
@@ -303,7 +334,9 @@
             downloadReady.style.display = 'none';
           } else {
             runBtn.disabled = false;
-            runBtn.textContent = "立即运行";
+            runBtn.textContent = "立即运行（含下载附件）";
+            runTitlesBtn.disabled = false;
+            runTitlesBtn.textContent = "仅导出标题（不下载附件，更快）";
             stopBtn.classList.add('inactive');
             clearBtn.disabled = false;
             clearManifestBtn.disabled = false;
@@ -343,6 +376,13 @@
       poll();
     });
 
+    ajaxSubmitForm(document.getElementById('run-titles-form'), (data) => {
+      if (data.ok && !polling) {
+        polling = setInterval(poll, 2000);
+      }
+      poll();
+    });
+
     ajaxSubmitForm(document.getElementById('stop-form'), () => {
       if (!polling) polling = setInterval(poll, 2000);
       poll();
@@ -354,6 +394,7 @@
         // 跟"已清空"的状态对不上了，这里跟着重置成初始状态，避免误导。
         logBox.textContent = '（日志会在运行时显示在这里）';
         progressChecked.textContent = '0';
+        progressMatched.textContent = '0';
         progressSaved.textContent = '0';
         progressLine.style.display = 'none';
         downloadReady.style.display = 'none';
