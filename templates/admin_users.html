@@ -4,20 +4,7 @@
   <meta charset="UTF-8">
   <title>发票邮件筛选工具 - 用户统计</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <style>
-    body { font-family: -apple-system, "Microsoft YaHei", sans-serif; background: #f5f6f8; margin: 0; color: #222; }
-    header { background: #fff; padding: 14px 24px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 1px 4px rgba(0,0,0,0.06); }
-    header .title { font-weight: 700; }
-    header a { color: #d6323c; text-decoration: none; font-size: 13px; margin-left: 14px; }
-    .wrap { max-width: 900px; margin: 24px auto; padding: 0 16px; }
-    .card { background: #fff; border-radius: 10px; padding: 20px 24px; box-shadow: 0 1px 4px rgba(0,0,0,0.06); }
-    .card h2 { font-size: 16px; margin: 0 0 4px; }
-    .summary { color: #666; font-size: 13px; margin-bottom: 16px; }
-    table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid #eee; }
-    th { color: #666; font-weight: 600; }
-    .flash { background: #fff3cd; color: #664d03; padding: 10px; border-radius: 6px; margin-bottom: 16px; font-size: 13px; }
-  </style>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
   <header>

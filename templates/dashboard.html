@@ -4,52 +4,7 @@
   <meta charset="UTF-8">
   <title>发票邮件筛选工具 - 控制台</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <style>
-    body { font-family: -apple-system, "Microsoft YaHei", sans-serif; background: #f5f6f8; margin: 0; color: #222; }
-    header { background: #fff; padding: 14px 24px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 1px 4px rgba(0,0,0,0.06); }
-    header .title { font-weight: 700; }
-    header .who { font-size: 13px; color: #666; }
-    header a { color: #3281d6; text-decoration: none; font-size: 13px; }
-    .wrap { max-width: 980px; margin: 24px auto; padding: 0 16px; }
-    .card { background: #fff; border-radius: 10px; padding: 20px 24px; margin-bottom: 20px; box-shadow: 0 1px 4px rgba(0,0,0,0.06); }
-    .card h2 { font-size: 16px; margin: 0 0 14px; }
-    .status-badge { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
-    .status-ok { background: #e6f4ea; color: #1e7e34; }
-    .row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
-    label { display: block; font-size: 13px; color: #444; margin: 12px 0 4px; }
-    input[type=text] { width: 100%; padding: 8px 10px; border: 1px solid #ddd; border-radius: 6px; box-sizing: border-box; font-size: 13px; }
-    .checkbox-row { display: flex; align-items: center; gap: 6px; margin: 10px 0; font-size: 13px; }
-    .btn { display: inline-block; background: #3281d6; color: #fff; padding: 9px 18px; border-radius: 6px; text-decoration: none; font-weight: 600; border: none; cursor: pointer; font-size: 13px; }
-    .btn:hover { background: #6babf1; }
-    .btn-secondary { background: #444; }
-    .btn-secondary:hover { background: #222; }
-    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
-    .btn:disabled:hover { background: #3281d6; }
-    .btn-secondary:disabled:hover { background: #444; }
-    /* 停止按钮不用 disabled 属性(那样点击不会有任何反馈)，改用这个类只做视觉变灰，
-       点击时仍然会提交，由后端告诉用户"当前没有正在运行的任务"。 */
-    .btn-secondary.inactive { opacity: 0.4; }
-    .hint { color: #888; font-size: 12px; margin-top: 4px; }
-    .extract-field-row { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; }
-    .extract-field-row input[type=text] { flex: 1; margin: 0; }
-    .extract-field-row .btn-remove { padding: 6px 12px; font-size: 12px; flex-shrink: 0; }
-    .flash { background: #fff3cd; color: #664d03; padding: 10px; border-radius: 6px; margin-bottom: 16px; font-size: 13px; }
-    #log-box { background: #111; color: #ddd; font-family: monospace; font-size: 12px; padding: 12px; border-radius: 8px; height: 220px; overflow-y: auto; white-space: pre-wrap; }
-    table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid #eee; }
-    th { color: #666; font-weight: 600; }
-    a.link { color: #1a56db; }
-    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
-    .spinner { display: inline-block; margin-right: 4px; color: #3281d6; animation: pulse 1s infinite; }
-    #toast {
-      position: fixed; top: 18px; left: 50%; transform: translateX(-50%) translateY(-8px);
-      background: #333; color: #fff; padding: 10px 20px; border-radius: 8px; font-size: 13px;
-      box-shadow: 0 4px 16px rgba(0,0,0,0.2); z-index: 1000; opacity: 0; pointer-events: none;
-      transition: opacity 0.2s ease, transform 0.2s ease; max-width: 80vw; text-align: center;
-    }
-    #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
-    #toast.error { background: #b3261e; }
-  </style>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
   <div id="toast"></div>

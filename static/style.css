@@ -1,0 +1,206 @@
+/*
+style.css
+三个页面（登录页/控制台/用户统计）共用的样式表。之前这些样式是各自页面内联写的，
+颜色、圆角、按钮长得都不太一样（比如登录页按钮是红色，控制台按钮是蓝色），
+现在统一抽到这一个文件里，用 CSS 变量定义一套颜色/圆角/阴影，三个页面共用同一套观感。
+*/
+
+:root {
+  --color-primary: #2563eb;
+  --color-primary-hover: #1d4ed8;
+  --color-primary-light: #eff6ff;
+  --color-dark: #1f2937;
+  --color-dark-hover: #111827;
+  --color-text: #1f2937;
+  --color-text-muted: #6b7280;
+  --color-text-faint: #9ca3af;
+  --color-bg: #f3f4f7;
+  --color-card: #ffffff;
+  --color-border: #e5e7eb;
+  --color-success-bg: #dcfce7;
+  --color-success-text: #15803d;
+  --color-warning-bg: #fef3c7;
+  --color-warning-text: #92400e;
+  --color-error-bg: #fee2e2;
+  --color-error-text: #b91c1c;
+  --radius: 12px;
+  --radius-sm: 8px;
+  --shadow-card: 0 1px 3px rgba(15, 23, 42, 0.06), 0 1px 2px rgba(15, 23, 42, 0.04);
+  --shadow-elevated: 0 10px 30px rgba(15, 23, 42, 0.12);
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  font-family: var(--font-sans);
+  background: var(--color-bg);
+  color: var(--color-text);
+  margin: 0;
+  -webkit-font-smoothing: antialiased;
+}
+
+header {
+  background: var(--color-card);
+  padding: 16px 28px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid var(--color-border);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+header .title {
+  font-weight: 700;
+  font-size: 15px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  letter-spacing: -0.01em;
+}
+header .title::before {
+  content: "";
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--color-primary), #60a5fa);
+  box-shadow: 0 0 0 3px var(--color-primary-light);
+}
+header .who { font-size: 13px; color: var(--color-text-muted); }
+header a { color: var(--color-primary); text-decoration: none; font-size: 13px; font-weight: 600; }
+header a:hover { text-decoration: underline; }
+
+.wrap { max-width: 1000px; margin: 28px auto; padding: 0 20px 40px; }
+
+.card {
+  background: var(--color-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 24px 28px;
+  margin-bottom: 20px;
+  box-shadow: var(--shadow-card);
+}
+.card h2 {
+  font-size: 15px;
+  margin: 0 0 16px;
+  font-weight: 700;
+  color: var(--color-text);
+  letter-spacing: -0.01em;
+}
+
+.status-badge { display: inline-block; padding: 4px 12px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+.status-ok { background: var(--color-success-bg); color: var(--color-success-text); }
+
+.row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+
+label { display: block; font-size: 13px; font-weight: 600; color: #374151; margin: 14px 0 6px; }
+input[type=text] {
+  width: 100%;
+  padding: 9px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  box-sizing: border-box;
+  font-size: 13px;
+  font-family: inherit;
+  background: #fff;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+input[type=text]:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px var(--color-primary-light);
+}
+input[type=text]::placeholder { color: var(--color-text-faint); }
+
+.checkbox-row { display: flex; align-items: center; gap: 8px; margin: 12px 0; font-size: 13px; color: #374151; }
+.checkbox-row input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--color-primary); cursor: pointer; }
+
+.btn {
+  display: inline-block;
+  background: var(--color-primary);
+  color: #fff;
+  padding: 10px 20px;
+  border-radius: var(--radius-sm);
+  text-decoration: none;
+  font-weight: 600;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  font-family: inherit;
+  transition: background .15s ease, box-shadow .15s ease, transform .1s ease;
+}
+.btn:hover { background: var(--color-primary-hover); box-shadow: 0 4px 14px rgba(37, 99, 235, .25); }
+.btn:active { transform: translateY(1px); }
+.btn-secondary { background: var(--color-dark); }
+.btn-secondary:hover { background: var(--color-dark-hover); box-shadow: 0 4px 14px rgba(31, 41, 55, .22); }
+.btn:disabled { opacity: .45; cursor: not-allowed; box-shadow: none; transform: none; }
+.btn:disabled:hover { background: var(--color-primary); box-shadow: none; }
+.btn-secondary:disabled:hover { background: var(--color-dark); box-shadow: none; }
+/* 停止按钮不用 disabled 属性(那样点击不会有任何反馈)，改用这个类只做视觉变灰，
+   点击时仍然会提交，由后端告诉用户"当前没有正在运行的任务"。 */
+.btn-secondary.inactive { opacity: .45; }
+.btn-remove { padding: 6px 12px; font-size: 12px; }
+
+.hint { color: var(--color-text-faint); font-size: 12px; margin-top: 6px; line-height: 1.6; }
+.flash {
+  background: var(--color-warning-bg);
+  color: var(--color-warning-text);
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  margin-bottom: 16px;
+  font-size: 13px;
+  border: 1px solid #fde68a;
+}
+
+#log-box {
+  background: #0f172a;
+  color: #cbd5e1;
+  font-family: "SFMono-Regular", Consolas, "Courier New", monospace;
+  font-size: 12px;
+  padding: 14px;
+  border-radius: var(--radius-sm);
+  height: 220px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  line-height: 1.6;
+  border: 1px solid #1e293b;
+}
+
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--color-border); }
+th { color: var(--color-text-muted); font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; }
+tbody tr { transition: background .1s ease; }
+tbody tr:hover { background: #f9fafb; }
+a.link { color: var(--color-primary); text-decoration: none; font-weight: 500; }
+a.link:hover { text-decoration: underline; }
+
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+.spinner { display: inline-block; margin-right: 6px; color: var(--color-primary); animation: pulse 1s infinite; }
+
+#toast {
+  position: fixed;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%) translateY(-8px);
+  background: #1f2937;
+  color: #fff;
+  padding: 12px 22px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  box-shadow: var(--shadow-elevated);
+  z-index: 1000;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .2s ease, transform .2s ease;
+  max-width: 80vw;
+  text-align: center;
+}
+#toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+#toast.error { background: #b91c1c; }
+
+.extract-field-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+.extract-field-row input[type=text] { flex: 1; margin: 0; }
+
+.summary { color: var(--color-text-muted); font-size: 13px; margin-bottom: 16px; }
