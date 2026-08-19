@@ -91,8 +91,16 @@
         <label title="Zoho 搜索语法本身不支持排除条件，这里是网站自己在拿到 Zoho 搜索结果之后再过滤一遍。">发件人排除（不包含）</label>
         <input type="text" name="search_sender_excludes" value="{{ user.search_sender_excludes }}" placeholder="tanzlogis.com" title="Zoho 搜索语法本身不支持排除条件，这里是网站自己在拿到 Zoho 搜索结果之后再过滤一遍。">
 
-        <label>只扫描此日期之后</label>
-        <input type="text" name="search_since_date" value="{{ user.search_since_date }}" placeholder="YYYY-MM-DD" style="width:160px;">
+        <div style="display:flex; gap:16px; flex-wrap:wrap;">
+          <div>
+            <label>只扫描此日期之后</label>
+            <input type="text" name="search_since_date" value="{{ user.search_since_date }}" placeholder="YYYY-MM-DD" style="width:160px;">
+          </div>
+          <div>
+            <label title="可选，范围的结束日期（含当天）。不填的话运行时自动按当天算，不用每次手动填今天的日期。">扫描到此日期为止（可选）</label>
+            <input type="text" name="search_until_date" value="{{ user.search_until_date }}" placeholder="不填=今天" style="width:160px;" title="可选，范围的结束日期（含当天）。不填的话运行时自动按当天算，不用每次手动填今天的日期。">
+          </div>
+        </div>
 
         <div class="checkbox-row" style="margin-top:14px;">
           <input type="checkbox" id="search_require_attachment" name="search_require_attachment" {% if user.search_require_attachment %}checked{% endif %}>

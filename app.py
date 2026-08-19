@@ -442,6 +442,7 @@ def register_routes(app):
         user.search_content_contains = request.form.get("search_content_contains", "")
         user.search_sender_excludes = request.form.get("search_sender_excludes", "")
         user.search_since_date = request.form.get("search_since_date", "").strip()
+        user.search_until_date = request.form.get("search_until_date", "").strip()
         user.search_require_attachment = bool(request.form.get("search_require_attachment"))
         user.extract_fields = request.form.get("extract_fields", "")
 

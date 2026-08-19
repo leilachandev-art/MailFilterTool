@@ -38,6 +38,9 @@ class User(db.Model):
     search_sender_excludes = db.Column(db.Text, default="")
 
     search_since_date = db.Column(db.String(20), default="")  # YYYY-MM-DD，对应 Zoho 的 fromDate
+    # YYYY-MM-DD，对应 Zoho 的 toDate。可选——留空的话运行时会自动按"当天"算，不用用户
+    # 每次手动填今天的日期，也不影响"完全不填日期范围"这种最常见的用法。
+    search_until_date = db.Column(db.String(20), default="")
     # 对应 Zoho 的 has:attachment。这个工具默认不要求带附件——很多时候只是想批量导出符合
     # 条件的邮件标题（比如按发件人域名筛某个供应商的所有邮件），不管有没有附件都要看到。
     search_require_attachment = db.Column(db.Boolean, default=False)

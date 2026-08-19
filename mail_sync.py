@@ -200,6 +200,7 @@ def _do_sync(app, user_id, run_id, download_attachments=True):
             user.search_content_contains,
             user.search_since_date,
             bool(user.search_require_attachment),
+            until_date=user.search_until_date,
         )
         if not search_key:
             log(app, user_id, run_id, "[出错] 筛选条件全部留空，没法搜索，请先填一个再运行。")
