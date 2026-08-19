@@ -30,6 +30,9 @@
        点击时仍然会提交，由后端告诉用户"当前没有正在运行的任务"。 */
     .btn-secondary.inactive { opacity: 0.4; }
     .hint { color: #888; font-size: 12px; margin-top: 4px; }
+    .extract-field-row { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; }
+    .extract-field-row input[type=text] { flex: 1; margin: 0; }
+    .extract-field-row .btn-remove { padding: 6px 12px; font-size: 12px; flex-shrink: 0; }
     .flash { background: #fff3cd; color: #664d03; padding: 10px; border-radius: 6px; margin-bottom: 16px; font-size: 13px; }
     #log-box { background: #111; color: #ddd; font-family: monospace; font-size: 12px; padding: 12px; border-radius: 8px; height: 220px; overflow-y: auto; white-space: pre-wrap; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -108,7 +111,10 @@
         </div>
 
         <label title="下载 PDF 附件时会调用 AI 按这几个字段名去读文档内容提取，不是关键词/表格匹配，排版差异大的发票也能读懂；拿不准的值会留空，不瞎猜。">AI 从附件里提取哪些字段</label>
-        <input type="text" name="extract_fields" value="{{ user.extract_fields }}" placeholder="金额, 币种, container号">
+        <div id="extract-fields-list"></div>
+        <button type="button" class="btn btn-secondary" id="add-extract-field-btn" style="padding:6px 14px; font-size:12px;">+ 添加字段</button>
+        <input type="hidden" name="extract_fields" id="extract-fields-hidden">
+        <p class="hint" style="margin-top:8px;">每个输入框填一个字段名，比如"发票总金额""币种""container号"，点"+ 添加字段"可以再加一个；不需要的字段点它旁边的"删除"。</p>
         {% if ai_problem %}
         <p class="hint" style="color:#b3261e;">⚠ 暂时用不了：{{ ai_problem }}</p>
         {% endif %}
@@ -171,7 +177,7 @@
       </div>
       <table>
         <thead>
-          <tr>
+          <tr id="manifest-header-row">
             <th>时间</th><th>发件人名</th><th>发件人邮箱</th><th>主题</th><th>附件标题</th>
             {% for name in extract_field_names %}<th>{{ name }}</th>{% endfor %}
           </tr>
@@ -267,6 +273,7 @@
 
     // ---- 处理记录表格：运行结束后自动刷新，不用手动刷新整个页面 ----
     const manifestTbody = document.getElementById('manifest-tbody');
+    const manifestHeaderRow = document.getElementById('manifest-header-row');
     const manifestCount = document.getElementById('manifest-count');
     const manifestPagination = document.getElementById('manifest-pagination');
     let currentManifestPage = {{ page }};
@@ -281,7 +288,15 @@
         ? `<span style="font-weight:400; color:#888; font-size:13px;">（共 ${data.total_entries} 条，含无附件的邮件）</span>`
         : '';
 
-      const fieldCount = (data.field_names || []).length;
+      // 表头也要跟着重建，不然改了"AI 从附件里提取哪些字段"之后，如果没有整页刷新
+      // （只是运行完自动刷新了这个表格），新字段的值虽然能正常出现在行里，但表头
+      // 还是旧的，看起来就像"新增的列没生效"——这是导致这个问题的一个真实原因。
+      const fieldNames = data.field_names || [];
+      manifestHeaderRow.innerHTML =
+        '<th>时间</th><th>发件人名</th><th>发件人邮箱</th><th>主题</th><th>附件标题</th>'
+        + fieldNames.map(n => `<th>${escapeHtml(n)}</th>`).join('');
+
+      const fieldCount = fieldNames.length;
       if (!data.entries.length) {
         manifestTbody.innerHTML = `<tr><td colspan="${5 + fieldCount}" style="color:#999;">还没有记录</td></tr>`;
       } else {
@@ -430,6 +445,56 @@
         e.preventDefault();
       }
     }, true);
+
+    // ---- "AI 从附件里提取哪些字段"：改成一行一个字段的输入框，可以增删，
+    // 提交时把所有非空的值拼成逗号分隔的字符串塞进那个隐藏的 extract_fields 字段里，
+    // 后端接口完全没变，还是原来那个逗号分隔的字符串，只是前端的填写体验变了。 ----
+    const extractFieldsList = document.getElementById('extract-fields-list');
+    const extractFieldsHidden = document.getElementById('extract-fields-hidden');
+    const addExtractFieldBtn = document.getElementById('add-extract-field-btn');
+    const initialExtractFields = {{ extract_field_names | tojson }};
+
+    function syncExtractFieldsHidden() {
+      const values = Array.from(extractFieldsList.querySelectorAll('.extract-field-input'))
+        .map(inp => inp.value.trim())
+        .filter(v => v);
+      extractFieldsHidden.value = values.join(', ');
+    }
+
+    function addExtractFieldRow(value) {
+      const row = document.createElement('div');
+      row.className = 'extract-field-row';
+
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.className = 'extract-field-input';
+      input.placeholder = '字段名，比如：发票总金额';
+      input.value = value || '';
+      input.addEventListener('input', syncExtractFieldsHidden);
+
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.className = 'btn btn-secondary btn-remove';
+      removeBtn.textContent = '删除';
+      removeBtn.addEventListener('click', () => {
+        row.remove();
+        // 删空了的话补一行空的回来，不然用户没地方点了、没法再输入新字段。
+        if (!extractFieldsList.children.length) addExtractFieldRow('');
+        syncExtractFieldsHidden();
+      });
+
+      row.appendChild(input);
+      row.appendChild(removeBtn);
+      extractFieldsList.appendChild(row);
+    }
+
+    (initialExtractFields.length ? initialExtractFields : ['']).forEach(addExtractFieldRow);
+    syncExtractFieldsHidden();
+
+    addExtractFieldBtn.addEventListener('click', () => {
+      addExtractFieldRow('');
+      extractFieldsList.lastElementChild.querySelector('input').focus();
+    });
 
     ajaxSubmitForm(document.getElementById('config-form'));
 

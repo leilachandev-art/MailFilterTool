@@ -336,7 +336,10 @@ def _do_sync(app, user_id, run_id, download_attachments=True):
                                     content, extract_field_names
                                 )
                                 if extract_error:
-                                    log(app, user_id, run_id, f"[提示] 附件 {filename} AI 提取没成功（附件本身已正常下载）：{extract_error}")
+                                    # extract_error 不一定是"失败"——也可能是提取成功了，但某个值没通过
+                                    # 格式校验（比如 container 号校验位不对）这种"建议人工核对一下"的提示，
+                                    # 所以这里措辞不要预设成"没成功"，具体是哪种情况看 extract_error 内容。
+                                    log(app, user_id, run_id, f"[提示] 附件 {filename} 的 AI 提取：{extract_error}（附件本身已正常下载）")
 
                             new_saved += 1
                             new_matched += 1
