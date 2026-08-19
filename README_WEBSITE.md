@@ -78,6 +78,7 @@ git push -u origin main
 | `DATABASE_URL` | 第三步复制的 PostgreSQL Internal Database URL（多人同时在线用这个网站，这一项必填，不要漏；不填会退回到 SQLite 单文件数据库，人一多容易写冲突） |
 | `FORCE_HTTPS_COOKIES` | `1` |
 | `AI_EXTRACT_MAX_CONCURRENT`（可选） | 不填默认 3。控制"同时有几个 PDF 附件正在调用 AI 提取"的上限，好几个同事同时运行时用来防止一下子挤爆 Anthropic 的限流。一般不用改，账号限流额度比较高的话可以调大 |
+| `ALLOWED_LOGIN_EMAILS` 或 `ALLOWED_LOGIN_DOMAINS`（强烈建议配置） | 网站部署到公网后，不配这两项的话任何人只要有 Zoho 邮箱都能登录进来用，包括触发要花钱的 AI 提取功能。配一个域名（比如 `ALLOWED_LOGIN_DOMAINS=tanzlogis.com`）就只放行公司邮箱登录，没在名单里的人会被直接拦在登录页 |
 
 保存后点 **Create Web Service**（或 Manual Deploy → Deploy latest commit），Render 会自动拉代码、装依赖、启动。第一次部署一般要等几分钟，看 Logs 页面确认没有报错，最后出现类似 `Booting worker` 的字样就是成功了。
 
@@ -121,6 +122,7 @@ git push -u origin main
 
 ## 十、常见问题
 
+- **部署时报错 `ImportError: ... psycopg2/_psycopg...so: undefined symbol: _PyInterpreterState_Get`**：这是 Render 默认给新建的服务配了太新的 Python 版本（写这篇文档时是 3.14），但 `psycopg2-binary` 这个连 Postgres 用的库预编译的二进制包还没跟上这么新的 Python，装上了但导入就崩，不是你的配置错了。项目根目录已经放了一个 `.python-version` 文件（内容是 `3.12`），Render 识别到这个文件会自动改用 3.12，这个版本 `psycopg2-binary` 完全兼容；如果代码是更早时候推上去的、还没有这个文件，去 GitHub 确认一下 `.python-version` 有没有推上去，推上去之后回 Render 手动 Manual Deploy 重新部署一次就好了。
 - **部署后打开网址显示 502 或者一直转圈**：先看 Render 的 Logs 页面有没有报错。常见原因是环境变量没填全（尤其是 `DATABASE_URL`）。
 - **Zoho 登录后报"没有从 Zoho 拿到账户信息"**：检查 `ZOHO_REDIRECT_URI` 环境变量和 Zoho API Console 里注册的地址是不是一字不差（包括 https、域名、路径）。
 - **同事反馈"点登录没反应"或者卡很久**：大概率是免费实例休眠了，正在冷启动，等个几十秒刷新一下页面。

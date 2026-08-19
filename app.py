@@ -60,6 +60,32 @@ def _admin_emails():
     return {e.strip().lower() for e in os.environ.get("ADMIN_EMAILS", "").split(",") if e.strip()}
 
 
+def _allowed_login_emails():
+    return {e.strip().lower() for e in os.environ.get("ALLOWED_LOGIN_EMAILS", "").split(",") if e.strip()}
+
+
+def _allowed_login_domains():
+    return {d.strip().lower().lstrip("@") for d in os.environ.get("ALLOWED_LOGIN_DOMAINS", "").split(",") if d.strip()}
+
+
+def _login_allowed(email):
+    """网站部署到公网后，任何人只要有 Zoho 邮箱都能点"用 Zoho 登录"进来，登录以后就能
+    用附件下载和 AI 提取字段这些功能——AI 提取是要花你 Anthropic 账号的钱的，不认识的人
+    登录进来跑几次就是在花你的钱，不是"泄露 API Key"这种意义上的被盗，而是"被陌生人蹭着用"。
+    这里用邮箱白名单/域名白名单兜底：两个环境变量都不填的话默认谁都能登录（没有变化，
+    兼容老配置）；只要配置了其中一个，登录时就会拿邮箱地址比对，不在名单里的人直接被
+    拦在登录页，压根创建不了账号，也就没机会触发扣费的功能。"""
+    emails = _allowed_login_emails()
+    domains = _allowed_login_domains()
+    if not emails and not domains:
+        return True
+    email_lower = (email or "").lower()
+    if email_lower in emails:
+        return True
+    domain = email_lower.split("@")[-1] if "@" in email_lower else ""
+    return domain in domains
+
+
 def _sqlite_column_ddl(column):
     """把 SQLAlchemy 的 Column 对象转成 ALTER TABLE ADD COLUMN 用的类型片段（函数名是
     历史遗留，实际上 SQLite / Postgres 都会用到这个函数，部署到 Render 用 Postgres 时
@@ -286,6 +312,10 @@ def register_routes(app):
             email_addr, account_id = zoho_oauth.get_account_info(access_token, api_domain)
         except Exception as e:
             flash(f"Zoho 授权处理失败：{e}")
+            return redirect(url_for("index"))
+
+        if not _login_allowed(email_addr):
+            flash(f"{email_addr} 不在允许登录的名单里，如果这是误拦请联系管理员。")
             return redirect(url_for("index"))
 
         user = User.query.filter_by(zoho_email=email_addr).first()
