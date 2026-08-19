@@ -127,3 +127,12 @@ class RunStatus(db.Model):
     checked_count = db.Column(db.Integer, default=0)
     saved_count = db.Column(db.Integer, default=0)  # 已下载的附件数
     matched_count = db.Column(db.Integer, default=0)  # 命中筛选条件的邮件数(不管有没有附件)
+
+    # 本次运行目前"已知"的 Zoho 搜索结果总数——Zoho 搜索接口是分页拿的，没法提前知道
+    # 精确总数，这个值是每拉一页就累加一次，大多数情况（结果不到 200 封，一页就拿完）
+    # 从一开始就是准确的总数；结果特别多、要拿好几页的话，这个数会跟着拉页慢慢涨，
+    # 不是从头就"准"，但作为进度条的分母已经够用。给非管理员看的简化进度条用。
+    total_count = db.Column(db.Integer, default=0)
+    # 上一次运行有没有出过错（看有没有记过"[出错]"开头的日志），给非管理员看的简化
+    # 状态用——他们看不到详细日志，只显示"运行正常"还是"上次运行出错"这种粗粒度状态。
+    last_run_ok = db.Column(db.Boolean, default=True)

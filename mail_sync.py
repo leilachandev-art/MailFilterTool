@@ -92,6 +92,13 @@ def log(app, user_id, run_id, message):
     with app.app_context():
         try:
             db.session.add(RunLog(user_id=user_id, run_id=run_id, message=message))
+            if message.startswith("[出错]"):
+                # 非管理员看不到详细日志，只看得到"运行正常"还是"上次运行出错"这种粗粒度
+                # 状态，这里顺手记一下。一次运行里只要出过一次错就标 False，不会被同一次
+                # 运行里后面的正常日志重新翻回 True（要等下一次运行开始时才重置）。
+                status = RunStatus.query.get(user_id)
+                if status:
+                    status.last_run_ok = False
             commit_with_retry(db.session)
         except Exception as e:
             db.session.rollback()
@@ -118,6 +125,8 @@ def run_sync_for_user(app, user_id, run_id=None, download_attachments=True):
             status.checked_count = 0
             status.saved_count = 0
             status.matched_count = 0
+            status.total_count = 0
+            status.last_run_ok = True
             commit_with_retry(db.session)
 
         _do_sync(app, user_id, run_id, download_attachments=download_attachments)
@@ -268,6 +277,12 @@ def _do_sync(app, user_id, run_id, download_attachments=True):
                 break
 
             log(app, user_id, run_id, f"拉取第 {page + 1} 页搜索结果，共 {len(messages)} 封")
+            if status:
+                # 累加"目前已知的搜索结果总数"，给非管理员看的简化进度条当分母。结果不到
+                # 一页（最常见的情况）从这里就是准确总数了；结果特别多要翻好几页的话，
+                # 这个数会跟着每次翻页慢慢涨，不是从一开始就"准"，但够用来看大概进度。
+                status.total_count += len(messages)
+                commit_with_retry(db.session)
 
             for msg_index, msg in enumerate(messages):
                 if msg_index % 20 == 0 and _stop_requested(user_id):

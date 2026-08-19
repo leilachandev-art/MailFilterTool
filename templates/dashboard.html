@@ -114,6 +114,7 @@
       </form>
       <p class="hint">改了筛选条件后，之前扫描过但没命中的邮件不会自动重新检查。如需重新全量扫描，点"清空处理记录"。"清空附件历史"清的是下面那张可见的表格（已保存附件的溯源记录），两个按钮互不影响。</p>
 
+      {% if is_admin %}
       <div id="progress-line" style="display:none; margin-top:14px; font-size:13px; color:#333;">
         <span class="spinner">●</span>
         已检查 <b id="progress-checked">0</b> 封邮件，命中 <b id="progress-matched">0</b> 封，已下载附件 <b id="progress-saved">0</b> 个
@@ -122,6 +123,23 @@
         <a class="btn" id="download-link" href="#">下载本次结果（ZIP）</a>
       </div>
       <div id="log-box" style="margin-top:12px;">（日志会在运行时显示在这里）</div>
+      {% else %}
+      <!-- 非管理员看不到详细日志和命中/下载这些细分数字，只看一个简单的"运行正常/运行中/
+           出错了"状态，加一个"已检查 X / 共 Y 封"的进度条。 -->
+      <div id="simple-status-line" style="margin-top:14px; font-size:13px;">
+        <span id="simple-status-dot" style="display:inline-block; width:8px; height:8px; border-radius:50%; background:#9ca3af; margin-right:8px; vertical-align:middle;"></span>
+        <span id="simple-status-text" style="vertical-align:middle;">运行状态：待运行</span>
+        <div id="simple-progress-wrap" style="display:none; margin-top:10px; max-width:320px;">
+          <div style="background:#e5e7eb; border-radius:999px; height:8px; overflow:hidden;">
+            <div id="simple-progress-fill" style="background:var(--color-primary); height:100%; width:0%; transition:width .3s ease;"></div>
+          </div>
+          <div class="hint" style="margin-top:6px;">已处理 <b id="simple-progress-text">0/0</b> 封</div>
+        </div>
+      </div>
+      <div id="download-ready" style="display:none; margin-top:12px;">
+        <a class="btn" id="download-link" href="#">下载本次结果（ZIP）</a>
+      </div>
+      {% endif %}
     </div>
 
     <div class="card">
@@ -209,6 +227,8 @@
       });
     }
 
+    // 下面这几个（log-box、progress-line 及其内部的三个数字）只有管理员的页面上才有对应
+    // 的 DOM 元素，非管理员是 null——用到的地方都要判断一下存不存在，不然会直接报错。
     const logBox = document.getElementById('log-box');
     const runBtn = document.getElementById('run-btn');
     const runTitlesBtn = document.getElementById('run-titles-btn');
@@ -221,6 +241,12 @@
     const progressSaved = document.getElementById('progress-saved');
     const downloadReady = document.getElementById('download-ready');
     const downloadLink = document.getElementById('download-link');
+    // 这几个反过来，只有非管理员的页面上才有。
+    const simpleStatusDot = document.getElementById('simple-status-dot');
+    const simpleStatusText = document.getElementById('simple-status-text');
+    const simpleProgressWrap = document.getElementById('simple-progress-wrap');
+    const simpleProgressFill = document.getElementById('simple-progress-fill');
+    const simpleProgressText = document.getElementById('simple-progress-text');
     let polling = null;
     // 用来判断"运行刚刚结束"这个瞬间（is_running 从 true 变成 false），
     // 只在这个瞬间才去刷新处理记录表格，不用每次轮询都重新拉一遍。
@@ -293,13 +319,40 @@
       fetch("{{ url_for('run_status') }}")
         .then(r => r.json())
         .then(data => {
-          if (data.logs && data.logs.length) {
+          // 下面这几个只有管理员的页面上才存在，非管理员是 null，跳过。
+          if (logBox && data.logs && data.logs.length) {
             logBox.textContent = data.logs.join("\n");
             logBox.scrollTop = logBox.scrollHeight;
           }
-          progressChecked.textContent = data.checked || 0;
-          progressMatched.textContent = data.matched || 0;
-          progressSaved.textContent = data.saved || 0;
+          if (progressChecked) progressChecked.textContent = data.checked || 0;
+          if (progressMatched) progressMatched.textContent = data.matched || 0;
+          if (progressSaved) progressSaved.textContent = data.saved || 0;
+          if (progressLine) progressLine.style.display = data.is_running ? 'block' : 'none';
+
+          // 非管理员看的简化状态：一个小圆点 + 一句话状态，加一条"已检查 X / 共 Y 封"的进度条。
+          if (simpleStatusText) {
+            const checked = data.checked || 0;
+            const total = data.total || 0;
+            if (data.is_running) {
+              simpleStatusDot.style.background = '#2563eb';
+              simpleStatusText.textContent = '运行中...';
+            } else if (data.last_run_ok === false) {
+              simpleStatusDot.style.background = '#b91c1c';
+              simpleStatusText.textContent = '上次运行出错了，可以重新运行一次，仍有问题请联系管理员';
+            } else {
+              simpleStatusDot.style.background = '#15803d';
+              simpleStatusText.textContent = '运行状态：正常';
+            }
+            if (data.is_running || total > 0) {
+              simpleProgressWrap.style.display = 'block';
+              simpleProgressText.textContent = `${checked}/${total}`;
+              const pct = total > 0 ? Math.min(100, Math.round((checked / total) * 100)) : 0;
+              simpleProgressFill.style.width = pct + '%';
+            } else {
+              simpleProgressWrap.style.display = 'none';
+            }
+          }
+
           if (data.is_running) {
             runBtn.disabled = true;
             runBtn.textContent = "运行中...";
@@ -308,7 +361,6 @@
             stopBtn.classList.remove('inactive');
             clearBtn.disabled = true;
             clearManifestBtn.disabled = true;
-            progressLine.style.display = 'block';
             downloadReady.style.display = 'none';
           } else {
             runBtn.disabled = false;
@@ -318,7 +370,6 @@
             stopBtn.classList.add('inactive');
             clearBtn.disabled = false;
             clearManifestBtn.disabled = false;
-            progressLine.style.display = 'none';
             if (data.download_url) {
               downloadLink.href = data.download_url;
               downloadReady.style.display = 'block';
@@ -370,11 +421,16 @@
       if (data.ok) {
         // 清空处理记录后，运行模块里显示的是上一次运行留下的旧日志/进度/下载链接，
         // 跟"已清空"的状态对不上了，这里跟着重置成初始状态，避免误导。
-        logBox.textContent = '（日志会在运行时显示在这里）';
-        progressChecked.textContent = '0';
-        progressMatched.textContent = '0';
-        progressSaved.textContent = '0';
-        progressLine.style.display = 'none';
+        if (logBox) logBox.textContent = '（日志会在运行时显示在这里）';
+        if (progressChecked) progressChecked.textContent = '0';
+        if (progressMatched) progressMatched.textContent = '0';
+        if (progressSaved) progressSaved.textContent = '0';
+        if (progressLine) progressLine.style.display = 'none';
+        if (simpleProgressWrap) simpleProgressWrap.style.display = 'none';
+        if (simpleStatusText) {
+          simpleStatusDot.style.background = '#9ca3af';
+          simpleStatusText.textContent = '运行状态：待运行';
+        }
         downloadReady.style.display = 'none';
       }
     });

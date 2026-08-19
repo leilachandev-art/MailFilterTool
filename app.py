@@ -656,8 +656,11 @@ def register_routes(app):
         is_running = bool(status and status.is_running)
         run_id = status.current_run_id if status else None
 
+        # 详细的运行日志（原始文字，包含内部报错信息之类的技术细节）只给管理员看；
+        # 非管理员这里直接不下发，而不是前端拿到了藏起来——不然打开浏览器开发者工具
+        # 还是能在网络请求里看到，起不到"仅管理员可见"的效果。
         logs = []
-        if run_id:
+        if run_id and is_admin_user(user):
             rows = (
                 RunLog.query.filter_by(user_id=user.id, run_id=run_id)
                 .order_by(RunLog.created_at.asc())
@@ -670,16 +673,20 @@ def register_routes(app):
         if run_id and (status.saved_count if status else 0):
             download_url = url_for("download_run", run_id=run_id)
 
-        return jsonify(
-            {
-                "is_running": is_running,
-                "logs": logs,
-                "checked": status.checked_count if status else 0,
-                "matched": status.matched_count if status else 0,
-                "saved": status.saved_count if status else 0,
-                "download_url": download_url,
-            }
-        )
+        payload = {
+            "is_running": is_running,
+            "logs": logs,
+            "checked": status.checked_count if status else 0,
+            "total": status.total_count if status else 0,
+            "last_run_ok": bool(status.last_run_ok) if status and status.last_run_ok is not None else True,
+            "download_url": download_url,
+        }
+        # 命中/已下载这两个细分数字也归在"运行板块的数据"里，一并只给管理员看；
+        # 非管理员只看"已检查/总数"这一组，够拼出 2/221 这种进度就行。
+        if is_admin_user(user):
+            payload["matched"] = status.matched_count if status else 0
+            payload["saved"] = status.saved_count if status else 0
+        return jsonify(payload)
 
 
 # 用一个小 dict 存 app 引用，方便在 /run 路由里拿到 app 传给后台线程
