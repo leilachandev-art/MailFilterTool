@@ -174,8 +174,22 @@ def _do_sync(app, user_id, run_id, download_attachments=True):
 
         # ---- 刷新 Zoho token ----
         log(app, user_id, run_id, "正在刷新 Zoho 登录状态 ...")
+        zoho_refresh_token = token_crypto.decrypt(user.zoho_refresh_token)
+        if token_crypto.looks_encrypted(zoho_refresh_token):
+            # 解密失败了（存的密文用现在这把 TOKEN_ENCRYPTION_KEY 解不开，通常是这个环境变量
+            # 没有固定设置、每次重新部署都随机生成了一把新钥匙）。这种情况下不能把这坨密文
+            # 当成真的 refresh_token 发给 Zoho——那样只会得到一个"400"这种让人摸不着头脑的
+            # 错误。直接在这里拦下来，给一个能照着做的提示。
+            log(
+                app, user_id, run_id,
+                "[出错] 保存的 Zoho 登录凭证解密失败，需要重新登录一次才能修复："
+                "退出登录后重新点\"用 Zoho 登录\"走一遍授权即可。"
+                "（根因通常是服务器的 TOKEN_ENCRYPTION_KEY 环境变量没有固定设置，"
+                "每次重新部署都换了一把新钥匙，之前加密保存的登录凭证就解不开了——"
+                "建议在 Render 的 Environment 页面把这一项显式配置成固定值，避免以后再发生。）",
+            )
+            return
         try:
-            zoho_refresh_token = token_crypto.decrypt(user.zoho_refresh_token)
             zoho_token_resp = zoho_oauth.refresh_access_token(zoho_refresh_token, user.zoho_accounts_server)
         except requests.exceptions.Timeout:
             log(app, user_id, run_id, "[出错] 连接 Zoho 服务器超时（超过 30 秒无响应），请检查网络/VPN 后重试。")

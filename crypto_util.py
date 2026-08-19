@@ -61,5 +61,17 @@ def decrypt(value):
     try:
         return _fernet.decrypt(value.encode()).decode()
     except Exception:
-        # 加密上线之前存的可能还是明文，原样返回，不让老数据直接报错。
+        # 解密失败可能是两种情况：1) 加密上线之前存的还是明文，这里原样返回，不让老数据
+        # 直接报错；2) TOKEN_ENCRYPTION_KEY 变了（比如部署平台没把它固定成环境变量，每次
+        # 重启/重新部署都随机生成一把新钥匙），存的密文用现在这把新钥匙解不开，这种情况下
+        # 原样返回的其实是一段还没解密的密文——调用方（mail_sync.py）会用 looks_encrypted()
+        # 识别出这种情况，给用户一个"需要重新登录"的清晰提示，而不是把这坨密文当成真的
+        # refresh_token 发给 Zoho，得到一个让人摸不着头脑的 400 错误。
         return value
+
+
+def looks_encrypted(value):
+    """粗略判断这个字符串是不是"还没解密成功的 Fernet 密文"，而不是真的 token 明文。
+    Fernet 密文固定以版本字节 0x80 开头，编码成 base64 之后几乎总是以 "gAAAAA" 开头，
+    真实的 Zoho refresh_token 不会长这样，用这个前缀基本能可靠地区分两者。"""
+    return bool(value) and value.startswith("gAAAAA")
