@@ -21,6 +21,7 @@ Claude，把这些字段的值抠出来，不管发票排版长什么样，AI �
 import base64
 import json
 import os
+import threading
 
 try:
     import anthropic
@@ -32,6 +33,15 @@ except ImportError:
 # claude-sonnet-5 是目前的主力模型，文档理解能力强，适合发票这种排版差异很大的场景。
 # 如果想省钱可以在 .env 里把 ANTHROPIC_EXTRACT_MODEL 换成更便宜的模型试试效果。
 DEFAULT_MODEL = "claude-sonnet-5"
+
+# 部署成网站给多人用之后，可能好几个同事同时点"立即运行"，各自的 PDF 附件会并发
+# 调用 Anthropic API——量一大容易撞到账号的限流（rate limit），也可能让服务器
+# 短时间内开太多外部请求。这里用一个进程内的信号量把"同时在发起的 API 调用数"
+# 卡住，默认最多 3 个同时在跑，多的排队等，不是失败。可以用 AI_EXTRACT_MAX_CONCURRENT
+# 环境变量调整。注意：如果 Render 上开了多个 gunicorn worker 进程，这个上限是
+# "每个进程"各自的上限，不是跨进程的全局上限（进程之间不共享内存）。
+_MAX_CONCURRENT = max(1, int(os.environ.get("AI_EXTRACT_MAX_CONCURRENT", "3") or "3"))
+_CONCURRENCY_GATE = threading.Semaphore(_MAX_CONCURRENT)
 
 
 def _get_client():
@@ -91,26 +101,27 @@ def extract_fields_from_pdf(pdf_bytes, field_names):
     try:
         b64 = base64.standard_b64encode(pdf_bytes).decode("utf-8")
         model = os.environ.get("ANTHROPIC_EXTRACT_MODEL", DEFAULT_MODEL)
-        resp = client.messages.create(
-            model=model,
-            max_tokens=1024,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "document",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "application/pdf",
-                                "data": b64,
+        with _CONCURRENCY_GATE:
+            resp = client.messages.create(
+                model=model,
+                max_tokens=1024,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "document",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "application/pdf",
+                                    "data": b64,
+                                },
                             },
-                        },
-                        {"type": "text", "text": prompt},
-                    ],
-                }
-            ],
-        )
+                            {"type": "text", "text": prompt},
+                        ],
+                    }
+                ],
+            )
         text = "".join(
             block.text for block in resp.content if getattr(block, "type", "") == "text"
         ).strip()

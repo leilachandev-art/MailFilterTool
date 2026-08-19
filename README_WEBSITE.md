@@ -53,14 +53,15 @@ git push -u origin main
 3. **Runtime**: Python 3
 4. **Build Command**:
    ```
-   pip install -r requirements.txt psycopg2-binary
+   pip install -r requirements.txt
    ```
-   （`psycopg2-binary` 是连 PostgreSQL 需要的库，本机用 SQLite 测试不需要装它，所以没写进 `requirements.txt` 里，部署时单独在这行加上）
-5. **Start Command**:
+   （`psycopg2-binary` 已经在 `requirements.txt` 里了，不用再单独加）
+5. **Start Command**：项目根目录已经有一个 `Procfile`，Render 一般会自动识别，不用手填；如果 Render 界面要求你必须填一个 Start Command，就填跟 `Procfile` 里一样的这行：
    ```
-   gunicorn --bind 0.0.0.0:$PORT app:app
+   gunicorn --worker-class gthread --workers 2 --threads 4 --timeout 120 --bind 0.0.0.0:$PORT app:app
    ```
-6. Instance Type 选 **Free**
+   跟只用默认参数的 `gunicorn app:app` 比，这行显式开了 2 个进程、每个进程 4 个线程，是让"好几个同事同时点运行"能真正被并发处理、不用排队等前一个人的请求处理完，这一步不能省。
+6. Instance Type 选 **Free**（如果同时在线人数比较多、经常卡顿，可以考虑升级到 Starter，$7/月起，内存和 CPU 都更宽裕）
 
 ## 五、配置环境变量
 
@@ -74,8 +75,9 @@ git push -u origin main
 | `ZOHO_CLIENT_SECRET` | 同上，Client Secret |
 | `ZOHO_REDIRECT_URI` | 先随便填 `https://placeholder.onrender.com/auth/zoho/callback`，第一次部署成功、拿到真实域名后回来改成真的 |
 | `ZOHO_SCOPE` | `ZohoMail.accounts.READ,ZohoMail.messages.READ,ZohoMail.folders.READ` |
-| `DATABASE_URL` | 第三步复制的 PostgreSQL Internal Database URL |
+| `DATABASE_URL` | 第三步复制的 PostgreSQL Internal Database URL（多人同时在线用这个网站，这一项必填，不要漏；不填会退回到 SQLite 单文件数据库，人一多容易写冲突） |
 | `FORCE_HTTPS_COOKIES` | `1` |
+| `AI_EXTRACT_MAX_CONCURRENT`（可选） | 不填默认 3。控制"同时有几个 PDF 附件正在调用 AI 提取"的上限，好几个同事同时运行时用来防止一下子挤爆 Anthropic 的限流。一般不用改，账号限流额度比较高的话可以调大 |
 
 保存后点 **Create Web Service**（或 Manual Deploy → Deploy latest commit），Render 会自动拉代码、装依赖、启动。第一次部署一般要等几分钟，看 Logs 页面确认没有报错，最后出现类似 `Booting worker` 的字样就是成功了。
 
@@ -111,13 +113,15 @@ git push -u origin main
 - **服务器临时文件 3 天后自动清理**：附件下载链接（单个下载、ZIP、Excel 里的链接）都指向服务器临时目录，超过 3 天没清理会被自动删掉，建议跑完尽快下载，不要把 Excel 导出当长期归档用。
 - **发件人排除是客户端过滤**：Zoho 搜索 API 本身不支持"不包含"这种反向条件，"发件人排除"是网站拿到 Zoho 搜索结果后自己再筛一遍，条件设置很宽泛时可能会多拉一些页面来过滤，速度会慢一点。
 - **没有自动定时运行**：需要同事手动点"立即运行"。免费版做定时任务不太可靠，暂时没做。
-- **同时只能跑一个任务**：一个人的"立即运行"没跑完之前不能再点一次，这是有意设计的，避免重复处理同一封邮件。
+- **每个人自己同时只能跑一个任务**：这是"每个用户"各自的限制，不是全站限制——同事 A 在跑的时候同事 B 完全可以同时点自己的"立即运行"，互不影响；限制的是同一个人不能自己重复点两次，避免重复处理同一封邮件。
 - **大邮箱首次全量扫描可能较慢**：建议同事第一次用的时候，先把"只扫描此日期之后"设成最近几天测试，确认筛选条件没问题，再考虑要不要跑全量历史。
 - **PostgreSQL 免费版 90 天到期**：到期前 Render 会提醒，需要重新建一个数据库并迁移数据（或者升级付费版）。
+- **AI 提取有并发上限**：好几个同事同时运行、附件里又都是 PDF 时，"下载 PDF 附件时会用 AI 提取字段"这一步在同一个服务器进程内最多同时跑 `AI_EXTRACT_MAX_CONCURRENT`（默认 3）份，超出的会排队等，不会失败，只是会感觉比平时慢一点，这是为了不撞到 Anthropic 账号的限流。
+- **免费 Postgres 存储和连接数都有限**：为了不把免费额度占满，运行日志只保留最近 14 天（更早的会被自动清理，不影响功能），数据库连接池也做了限流；如果同时在线的同事经常超过十几个、或者数据量明显变大，建议升级到付费版 Postgres。
 
 ## 十、常见问题
 
-- **部署后打开网址显示 502 或者一直转圈**：先看 Render 的 Logs 页面有没有报错。常见原因是环境变量没填全（尤其是 `DATABASE_URL`），或者 Build Command 没装上 `psycopg2-binary`。
+- **部署后打开网址显示 502 或者一直转圈**：先看 Render 的 Logs 页面有没有报错。常见原因是环境变量没填全（尤其是 `DATABASE_URL`）。
 - **Zoho 登录后报"没有从 Zoho 拿到账户信息"**：检查 `ZOHO_REDIRECT_URI` 环境变量和 Zoho API Console 里注册的地址是不是一字不差（包括 https、域名、路径）。
 - **同事反馈"点登录没反应"或者卡很久**：大概率是免费实例休眠了，正在冷启动，等个几十秒刷新一下页面。
 - **重新部署后同事都要重新登录**：说明 `TOKEN_ENCRYPTION_KEY` 没有固定设置成环境变量（用的是自动生成的临时密钥），回到第五步把它显式设置好。

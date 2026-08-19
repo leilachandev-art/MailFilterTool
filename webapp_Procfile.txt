@@ -1,1 +1,5 @@
-web: gunicorn webapp_app:app
+# 这个文件是历史遗留（从 MailProcessWebsite 复制过来时带过来的旧模板，
+# 里面 webapp_app:app 这个模块名在这个项目里根本不存在，从来没被真正用过）。
+#
+# 实际部署用的 Procfile 是同目录下不带扩展名的 `Procfile` 那个文件，Render
+# 会自动识别它。这个 .txt 文件留着仅供参考，内容仅供参考，不会被部署流程读取。

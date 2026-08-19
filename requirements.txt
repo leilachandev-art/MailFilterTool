@@ -8,6 +8,7 @@ gunicorn==22.0.0
 openpyxl==3.1.5
 anthropic==0.40.0
 
-# psycopg2-binary 只有部署到 Render 并用 PostgreSQL 时才需要，本地用 SQLite 测试不用装。
-# 部署时如果用 Postgres，再单独执行：pip install psycopg2-binary
-# psycopg2-binary==2.9.9
+# 连 PostgreSQL 需要这个库（部署到 Render 用 Postgres 时会用到）。装了它但本地用
+# SQLite 测试完全没影响，不用单独装/卸载，所以直接放进 requirements.txt，部署时
+# Build Command 不用再额外补一个 psycopg2-binary。
+psycopg2-binary==2.9.9

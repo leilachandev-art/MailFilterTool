@@ -13,6 +13,7 @@ import re
 import shutil
 import time
 import uuid
+from datetime import datetime, timedelta
 
 import requests
 
@@ -22,6 +23,7 @@ import zoho_search_api as zsearch
 import crypto_util as token_crypto
 import ai_extract
 from models import db, User, ProcessedMessage, ManifestEntry, RunLog, RunStatus
+from db_utils import commit_with_retry
 
 PAGE_SIZE = 200
 MAX_PAGES = 25  # 安全阀，避免筛选条件太宽泛时无限翻页
@@ -84,9 +86,16 @@ def _save_local(folder, filename, content):
 # ================= 主流程 =================
 
 def log(app, user_id, run_id, message):
+    """写一条日志。这个函数在同步循环里调用非常频繁（几乎每封邮件都可能触发），
+    如果因为一时锁冲突写失败，只打印到控制台兜底，绝不能让"记日志"这个动作本身
+    把整个同步任务搞崩——那样用户反而看不到任何有用的错误信息。"""
     with app.app_context():
-        db.session.add(RunLog(user_id=user_id, run_id=run_id, message=message))
-        db.session.commit()
+        try:
+            db.session.add(RunLog(user_id=user_id, run_id=run_id, message=message))
+            commit_with_retry(db.session)
+        except Exception as e:
+            db.session.rollback()
+            print(f"[写日志失败，仅打印到控制台] user={user_id} run={run_id}: {message} (写库报错: {e})")
 
 
 def run_sync_for_user(app, user_id, run_id=None, download_attachments=True):
@@ -109,19 +118,44 @@ def run_sync_for_user(app, user_id, run_id=None, download_attachments=True):
             status.checked_count = 0
             status.saved_count = 0
             status.matched_count = 0
-            db.session.commit()
+            commit_with_retry(db.session)
 
         _do_sync(app, user_id, run_id, download_attachments=download_attachments)
     except Exception as e:
         log(app, user_id, run_id, f"[出错] 任务异常终止：{e}")
     finally:
         with app.app_context():
-            status = RunStatus.query.get(user_id)
-            if status:
-                status.is_running = False
-                status.stop_requested = False
-                db.session.commit()
+            try:
+                status = RunStatus.query.get(user_id)
+                if status:
+                    status.is_running = False
+                    status.stop_requested = False
+                    commit_with_retry(db.session)
+            except Exception as e:
+                db.session.rollback()
+                # 这里再失败也不能不管——is_running 卡在 True 会导致页面永远显示"运行中"，
+                # 后续手动重跑都会被"已经有任务在运行"拦住。打印出来方便排查，但流程继续走完。
+                print(f"[结束状态写库失败] user={user_id} run={run_id}: {e}")
         log(app, user_id, run_id, "---- 本次运行结束 ----")
+        _prune_old_logs(app, user_id)
+
+
+LOG_RETENTION_DAYS = 14
+
+
+def _prune_old_logs(app, user_id):
+    """部署成网站给多人用之后，同一个数据库要长期扛很多人反复点"运行"，run_log 表
+    只会越堆越大——尤其 Render 免费 Postgres 只有 1GB 存储，堆满了会影响所有人。
+    这里每次运行结束顺手删掉这个用户超过 14 天的旧日志，只影响历史日志能往前翻多久，
+    不影响任何功能；删失败了也不能让这次运行本身看起来像是失败了，只打印不抛出。"""
+    try:
+        with app.app_context():
+            cutoff = datetime.utcnow() - timedelta(days=LOG_RETENTION_DAYS)
+            RunLog.query.filter(RunLog.user_id == user_id, RunLog.created_at < cutoff).delete()
+            commit_with_retry(db.session)
+    except Exception as e:
+        db.session.rollback()
+        print(f"[清理旧日志失败，不影响本次运行结果] user={user_id}: {e}")
 
 
 def _stop_requested(user_id):
@@ -157,7 +191,7 @@ def _do_sync(app, user_id, run_id, download_attachments=True):
             _, account_id = zoho_oauth.get_account_info(access_token, user.zoho_api_domain)
             user.zoho_account_id = account_id
 
-        db.session.commit()
+        commit_with_retry(db.session)
 
         search_key = zsearch.build_search_key(
             user.search_subject_contains,
@@ -230,8 +264,12 @@ def _do_sync(app, user_id, run_id, download_attachments=True):
                 checked += 1
                 if status:
                     status.checked_count = checked
-                    if checked % 50 == 0:
-                        db.session.commit()  # 定期落库一下，即使这一段全是已处理过的邮件也能看到进度在走
+                    if checked % 10 == 0:
+                        # 定期落库一下"检查到第几封了"这个进度数字。这一段如果连续遇到很多
+                        # 已经处理过的邮件（continue 掉了，不会走到下面那次真正的 commit），
+                        # 进度条会看起来卡住不动——间隔调小一点（原来是 50），前端每 2 秒轮询
+                        # 一次页面上的"已检查 X 封"数字才能更跟手，不会一跳一大截。
+                        commit_with_retry(db.session)
                 if message_id in processed_uids:
                     continue
 
@@ -244,7 +282,7 @@ def _do_sync(app, user_id, run_id, download_attachments=True):
                     if exclude_terms and (_match_any(sender_email, exclude_terms) or _match_any(sender_name, exclude_terms)):
                         excluded += 1
                         db.session.add(ProcessedMessage(user_id=user.id, uid=message_id))
-                        db.session.commit()
+                        commit_with_retry(db.session)
                         processed_uids.add(message_id)
                         continue
 
@@ -326,7 +364,7 @@ def _do_sync(app, user_id, run_id, download_attachments=True):
                         )
 
                     db.session.add(ProcessedMessage(user_id=user.id, uid=message_id))
-                    db.session.commit()
+                    commit_with_retry(db.session)
                     processed_uids.add(message_id)
                 except Exception as e:
                     skipped += 1

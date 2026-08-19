@@ -22,7 +22,8 @@ import zipfile
 from datetime import datetime
 
 from flask import Flask, redirect, url_for, session, request, render_template, jsonify, flash, send_file
-from sqlalchemy import inspect, text, func
+from sqlalchemy import inspect, text, func, event
+from sqlalchemy.engine import Engine
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -32,6 +33,7 @@ import oauth_zoho as zoho_oauth
 import crypto_util as token_crypto
 import ai_extract
 from mail_sync import run_sync_for_user, DOWNLOADS_ROOT
+from db_utils import commit_with_retry
 
 try:
     from flask_wtf import CSRFProtect
@@ -59,14 +61,24 @@ def _admin_emails():
 
 
 def _sqlite_column_ddl(column):
-    """把 SQLAlchemy 的 Column 对象转成 SQLite 的 ALTER TABLE ADD COLUMN 类型片段。"""
-    col_type = column.type.compile(dialect=db.engine.dialect)
+    """把 SQLAlchemy 的 Column 对象转成 ALTER TABLE ADD COLUMN 用的类型片段（函数名是
+    历史遗留，实际上 SQLite / Postgres 都会用到这个函数，部署到 Render 用 Postgres 时
+    这个自动迁移也要跑）。
+    这里单独处理布尔值默认值的写法：SQLite 的布尔本质是整数，认 DEFAULT 1/0；但
+    Postgres 的布尔是独立类型，DDL 里写 DEFAULT 1 会直接报"类型不匹配"报错，必须写
+    DEFAULT TRUE/FALSE，两边语法不通用，不判断方言就硬编码 1/0 的话，部署到 Postgres
+    后只要新增一个带默认值的布尔列，启动迁移就会直接崩。"""
+    dialect = db.engine.dialect
+    col_type = column.type.compile(dialect=dialect)
     parts = [col_type]
     default = column.default
     if default is not None and getattr(default, "is_scalar", False):
         default_val = default.arg
         if isinstance(default_val, bool):
-            parts.append(f"DEFAULT {1 if default_val else 0}")
+            if dialect.name == "postgresql":
+                parts.append(f"DEFAULT {'TRUE' if default_val else 'FALSE'}")
+            else:
+                parts.append(f"DEFAULT {1 if default_val else 0}")
         elif isinstance(default_val, (int, float)):
             parts.append(f"DEFAULT {default_val}")
         elif isinstance(default_val, str):
@@ -124,6 +136,29 @@ def create_app():
     app.config["SQLALCHEMY_DATABASE_URI"] = db_url
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
+    is_sqlite = db_url.startswith("sqlite")
+    if is_sqlite:
+        # SQLite 同一时间只能有一个连接在写，默认还不等锁就直接抛 "database is locked"。
+        # 后台同步线程边跑边一条条 commit，同时页面还在轮询 /run/status、/manifest 读进度，
+        # 默认设置下很容易撞上。这里把 busy_timeout 调大（撞锁了先等最多 30 秒再报错，
+        # 不是立刻报错），下面 WAL 模式再让"读"不用等"写"，两个一起用才扛得住这种并发。
+        # 注意：这只是"单机本地测试多个请求并发"的兜底，真要给多个同事同时在线用，
+        # 部署到 Render 时务必配置 DATABASE_URL 用 Postgres（见 README_WEBSITE.md），
+        # SQLite 这套设置只能缓解，没法从根上支持很多人同时写。
+        app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {"connect_args": {"timeout": 30}}
+    else:
+        # Postgres（比如 Render 免费实例）本身就支持多连接并发读写，不需要 WAL 那一套，
+        # 但免费实例的最大连接数通常很有限（个位数到二十来个），而这个网站可能同时有
+        # 好几个 gunicorn worker 进程，每个进程自己维护一个连接池，池子开太大容易把
+        # 免费额度的连接数占满，导致后来的用户连不上库。这里把每个进程的池子调小一点。
+        # pool_pre_ping=True 是为了防止连接闲置一段时间后被数据库那边悄悄断开
+        # （免费实例常见），不加的话第一次用到断线的连接会直接报错，而不是自动换一个。
+        app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
+            "pool_pre_ping": True,
+            "pool_size": 3,
+            "max_overflow": 2,
+        }
+
     # ---- Session / Cookie 安全加固 ----
     app.config["SESSION_COOKIE_HTTPONLY"] = True
     app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
@@ -132,6 +167,16 @@ def create_app():
     app.config["SESSION_COOKIE_SECURE"] = os.environ.get("FORCE_HTTPS_COOKIES", "0") == "1"
 
     db.init_app(app)
+
+    if is_sqlite:
+        # 监听 SQLAlchemy 的通用 Engine（而不是 db.engine），是因为这里还没进入 app
+        # context，此时取 db.engine 会报错；反正这个进程里只有这一个数据库引擎，效果一样。
+        @event.listens_for(Engine, "connect")
+        def _sqlite_pragma(dbapi_connection, connection_record):
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=30000")
+            cursor.close()
 
     # ---- CSRF 防护：所有会改数据的 POST 表单都强制校验 token ----
     if _CSRF_AVAILABLE:
@@ -152,7 +197,7 @@ def create_app():
             for s in stale:
                 s.is_running = False
                 s.stop_requested = False
-            db.session.commit()
+            commit_with_retry(db.session)
 
     register_routes(app)
     return app
@@ -255,7 +300,7 @@ def register_routes(app):
         user.zoho_account_id = account_id
         user.last_login_at = datetime.utcnow()
         user.login_count = (user.login_count or 0) + 1
-        db.session.commit()
+        commit_with_retry(db.session)
 
         session["user_id"] = user.id
         return redirect(url_for("dashboard"))
@@ -370,7 +415,7 @@ def register_routes(app):
         user.search_require_attachment = bool(request.form.get("search_require_attachment"))
         user.extract_fields = request.form.get("extract_fields", "")
 
-        db.session.commit()
+        commit_with_retry(db.session)
         return _respond("配置已保存。")
 
     @app.route("/run", methods=["POST"])
@@ -535,7 +580,7 @@ def register_routes(app):
         status = RunStatus.query.get(user.id)
         if status and status.is_running:
             status.stop_requested = True
-            db.session.commit()
+            commit_with_retry(db.session)
             return _respond("已发送停止请求，正在停止当前运行 ...")
         return _respond("当前没有正在运行的任务。", ok=False)
 
@@ -550,7 +595,7 @@ def register_routes(app):
             return _respond("有任务正在运行，请先停止或等它跑完再清空处理记录。", ok=False)
 
         deleted = ProcessedMessage.query.filter_by(user_id=user.id).delete()
-        db.session.commit()
+        commit_with_retry(db.session)
         return _respond(f"已清空处理记录（{deleted} 条）。下次运行会重新扫描所有历史邮件，已经保存过的附件可能会重复保存一份。")
 
     @app.route("/clear_manifest", methods=["POST"])
@@ -567,7 +612,7 @@ def register_routes(app):
             return _respond("有任务正在运行，请先停止或等它跑完再清空附件历史。", ok=False)
 
         deleted = ManifestEntry.query.filter_by(user_id=user.id).delete()
-        db.session.commit()
+        commit_with_retry(db.session)
         return _respond(f"已清空附件历史（{deleted} 条）。之前的下载链接会跟着失效，不影响下次是否重新扫描邮件。")
 
     @app.route("/run/status")
