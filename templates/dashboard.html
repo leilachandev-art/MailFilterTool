@@ -10,10 +10,21 @@
   <div id="toast"></div>
   <header>
     <div class="title">发票邮件筛选工具</div>
-    <div class="who">{{ user.zoho_email }} · {% if is_admin %}<a href="{{ url_for('admin_users') }}">用户统计</a> · {% endif %}<a href="{{ url_for('logout') }}">退出登录</a></div>
+    <div class="who">
+      {{ user.zoho_email }} ·
+      {% if is_admin %}<a href="{{ url_for('admin_users') }}">用户统计</a> · {% endif %}
+      {% if real_is_admin and not previewing_member %}<a href="{{ url_for('dashboard', view='member') }}" title="只是切换这个页面怎么显示，不会真的改变你的管理员身份，也不影响其他人看到的内容">预览成员视图</a> · {% endif %}
+      <a href="{{ url_for('logout') }}">退出登录</a>
+    </div>
   </header>
 
   <div class="wrap">
+    {% if previewing_member %}
+    <div class="flash" style="background:#eff6ff; color:#1d4ed8; border-color:#bfdbfe;">
+      当前正在预览"普通成员"看到的界面（只是换个显示方式，你还是管理员，其他人看到的内容不受影响）。
+      <a href="{{ url_for('dashboard') }}">退出预览，返回管理员视图</a>
+    </div>
+    {% endif %}
     {% with messages = get_flashed_messages() %}
       {% if messages %}
         {% for m in messages %}<div class="flash">{{ m }}</div>{% endfor %}
@@ -65,14 +76,21 @@
           <label for="search_require_attachment" style="margin:0;">只看带附件的邮件（不勾选的话，没附件的邮件也会记录标题，方便批量导出）</label>
         </div>
 
-        <label title="下载 PDF 附件时会调用 AI 按这几个字段名去读文档内容提取，不是关键词/表格匹配，排版差异大的发票也能读懂；拿不准的值会留空，不瞎猜。">AI 从附件里提取哪些字段</label>
-        <div id="extract-fields-list"></div>
-        <button type="button" class="btn btn-secondary" id="add-extract-field-btn" style="padding:6px 14px; font-size:12px;">+ 添加字段</button>
+        <div class="checkbox-row" style="margin-top:14px;">
+          <input type="checkbox" id="ai_extract_enabled" name="ai_extract_enabled" {% if user.ai_extract_enabled %}checked{% endif %}>
+          <label for="ai_extract_enabled" style="margin:0;">启用 AI 从附件里提取字段（关掉的话，下面配置的字段名还会保留，只是运行时不会真的调用 AI，也就不会产生这部分费用）</label>
+        </div>
+
+        <div id="extract-fields-section" style="display:{{ 'block' if user.ai_extract_enabled else 'none' }};">
+          <label title="下载 PDF 附件时会调用 AI 按这几个字段名去读文档内容提取，不是关键词/表格匹配，排版差异大的发票也能读懂；拿不准的值会留空，不瞎猜。">AI 从附件里提取哪些字段</label>
+          <div id="extract-fields-list"></div>
+          <button type="button" class="btn btn-secondary" id="add-extract-field-btn" style="padding:6px 14px; font-size:12px;">+ 添加字段</button>
+          <p class="hint" style="margin-top:8px;">每个输入框填一个字段名，比如"发票总金额""币种""container号"，点"+ 添加字段"可以再加一个；不需要的字段点它旁边的"删除"。</p>
+          {% if ai_problem %}
+          <p class="hint" style="color:#b3261e;">⚠ 暂时用不了：{{ ai_problem }}</p>
+          {% endif %}
+        </div>
         <input type="hidden" name="extract_fields" id="extract-fields-hidden">
-        <p class="hint" style="margin-top:8px;">每个输入框填一个字段名，比如"发票总金额""币种""container号"，点"+ 添加字段"可以再加一个；不需要的字段点它旁边的"删除"。</p>
-        {% if ai_problem %}
-        <p class="hint" style="color:#b3261e;">⚠ 暂时用不了：{{ ai_problem }}</p>
-        {% endif %}
 
         <div style="margin-top: 18px;">
           <button class="btn" type="submit">保存配置</button>
@@ -506,6 +524,16 @@
       addExtractFieldRow('');
       extractFieldsList.lastElementChild.querySelector('input').focus();
     });
+
+    // 勾选"启用 AI 从附件里提取字段"才展示下面详细的字段列表；不勾就整块收起来，
+    // 不是简单变灰——字段本身还留在隐藏的 extract_fields 里，不会被清空，收起来
+    // 只是不想让人在没打算用这个功能的时候还要看一堆用不上的输入框。
+    const aiExtractEnabledCheckbox = document.getElementById('ai_extract_enabled');
+    const extractFieldsSection = document.getElementById('extract-fields-section');
+    function syncExtractFieldsSectionVisible() {
+      extractFieldsSection.style.display = aiExtractEnabledCheckbox.checked ? 'block' : 'none';
+    }
+    aiExtractEnabledCheckbox.addEventListener('change', syncExtractFieldsSectionVisible);
 
     ajaxSubmitForm(document.getElementById('config-form'));
 

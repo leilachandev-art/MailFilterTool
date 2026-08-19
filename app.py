@@ -351,13 +351,23 @@ def register_routes(app):
         page = request.args.get("page", 1, type=int) or 1
         rows, page, total_pages, total_entries = _query_manifest_page(user.id, page)
 
+        # 只有一个 Zoho 账号也能测试非管理员看到的界面：真正的管理员在网址后面加
+        # ?view=member 就能"预览"非管理员视角，不会真的改变自己的管理员身份，也不影响
+        # /run/status 等接口的权限判断（那些接口认的还是 is_admin_user() 的真实结果，
+        # 这里只是控制这一次页面渲染时把哪些区块显示出来）。
+        real_is_admin = is_admin_user(user)
+        previewing_member = real_is_admin and request.args.get("view") == "member"
+        effective_is_admin = real_is_admin and not previewing_member
+
         status = RunStatus.query.get(user.id)
         return render_template(
             "dashboard.html",
             user=user,
             entries=rows,
             status=status,
-            is_admin=is_admin_user(user),
+            is_admin=effective_is_admin,
+            real_is_admin=real_is_admin,
+            previewing_member=previewing_member,
             page=page,
             total_pages=total_pages,
             total_entries=total_entries,
@@ -445,6 +455,7 @@ def register_routes(app):
         user.search_until_date = request.form.get("search_until_date", "").strip()
         user.search_require_attachment = bool(request.form.get("search_require_attachment"))
         user.extract_fields = request.form.get("extract_fields", "")
+        user.ai_extract_enabled = bool(request.form.get("ai_extract_enabled"))
 
         commit_with_retry(db.session)
         return _respond("配置已保存。")

@@ -49,6 +49,9 @@ class User(db.Model):
     # 比如"发票号, 金额, 币种, container号"。下载 PDF 附件时会调用 Claude 按这几个
     # 字段名去读文档内容提取，不是关键词/表格正则匹配，排版差异大的发票也能读懂。----
     extract_fields = db.Column(db.Text, default=DEFAULT_EXTRACT_FIELDS)
+    # 独立的开关，跟"字段填了哪些"分开存——关掉这个开关时字段列表还留着（下次重新
+    # 打开不用重新敲一遍），只是运行时不会真的调用 AI，省下这部分 API 费用。
+    ai_extract_enabled = db.Column(db.Boolean, default=True)
 
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 

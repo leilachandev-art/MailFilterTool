@@ -231,13 +231,23 @@ def _do_sync(app, user_id, run_id, download_attachments=True):
         log(app, user_id, run_id, f"用 Zoho 搜索条件：{search_key}")
 
         exclude_terms = _split(user.search_sender_excludes)
-        extract_field_names = _split(user.extract_fields)
-        if download_attachments and extract_field_names:
-            ai_problem = ai_extract.diagnose()
-            if ai_problem:
-                log(app, user_id, run_id, f"[提示] AI 提取字段这个功能现在用不了：{ai_problem}")
+        # ai_extract_enabled 是独立于"填了哪些字段"的开关：关掉的话字段列表还留着（下次
+        # 重新打开不用重新敲一遍），只是这次运行不会真的调用 AI，也就不会有对应费用。
+        configured_field_names = _split(user.extract_fields)
+        extract_field_names = configured_field_names if user.ai_extract_enabled else []
+        if download_attachments and configured_field_names:
+            if not user.ai_extract_enabled:
+                log(
+                    app, user_id, run_id,
+                    f"[提示] AI 提取字段功能当前是关闭状态（已配置字段：{'、'.join(configured_field_names)}），"
+                    f"如需开启去筛选条件里勾选\"启用 AI 提取字段\"。",
+                )
             else:
-                log(app, user_id, run_id, f"下载 PDF 附件时会用 AI 提取这些字段：{'、'.join(extract_field_names)}")
+                ai_problem = ai_extract.diagnose()
+                if ai_problem:
+                    log(app, user_id, run_id, f"[提示] AI 提取字段这个功能现在用不了：{ai_problem}")
+                else:
+                    log(app, user_id, run_id, f"下载 PDF 附件时会用 AI 提取这些字段：{'、'.join(configured_field_names)}")
 
         download_dir = os.path.join(DOWNLOADS_ROOT, str(user_id), run_id)
         if download_attachments:
