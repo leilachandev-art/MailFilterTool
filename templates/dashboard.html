@@ -161,7 +161,11 @@
     </div>
 
     <div class="card">
-      <h2>处理记录 <span id="manifest-count">{% if total_entries %}<span style="font-weight:400; color:#888; font-size:13px;">（共 {{ total_entries }} 条，含无附件的邮件）</span>{% endif %}</span></h2>
+      <h2 id="manifest-toggle" style="cursor:pointer; display:flex; align-items:center; justify-content:space-between; margin-bottom:0;">
+        <span>处理记录 <span id="manifest-count">{% if total_entries %}<span style="font-weight:400; color:#888; font-size:13px;">（共 {{ total_entries }} 条，含无附件的邮件）</span>{% endif %}</span></span>
+        <span id="manifest-chevron" style="font-size:12px; color:var(--color-text-faint); transition:transform .15s ease;">▼</span>
+      </h2>
+      <div id="manifest-body" style="margin-top:16px;">
       <div style="margin-bottom:12px;">
         <a class="btn btn-secondary" href="{{ url_for('export_excel') }}">导出 Excel</a>
         <span class="hint" style="display:inline; margin-left:6px;">导出的下载链接需要登录同一个网站才能打开，服务器临时文件 3 天后会被清理，建议尽快下载，不要当长期归档用。AI 提取的那几列拿不准会留空，仅供参考，重要数字建议核对原附件。</span>
@@ -169,14 +173,13 @@
       <table>
         <thead>
           <tr id="manifest-header-row">
-            <th>时间</th><th>发件人名</th><th>发件人邮箱</th><th>主题</th><th>附件标题</th>
+            <th>发件人名</th><th>发件人邮箱</th><th>主题</th><th>附件标题</th>
             {% for name in extract_field_names %}<th>{{ name }}</th>{% endfor %}
           </tr>
         </thead>
         <tbody id="manifest-tbody">
           {% for e in entries %}
           <tr>
-            <td style="white-space:nowrap;">{{ e.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
             <td>{{ e.sender_name }}</td>
             <td>{{ e.sender_email }}</td>
             <td>{{ e.subject }}</td>
@@ -189,7 +192,7 @@
             {% for name in extract_field_names %}<td>{{ fields.get(name) or '' }}</td>{% endfor %}
           </tr>
           {% else %}
-          <tr><td colspan="{{ 5 + extract_field_names|length }}" style="color:#999;">还没有记录</td></tr>
+          <tr><td colspan="{{ 4 + extract_field_names|length }}" style="color:#999;">还没有记录</td></tr>
           {% endfor %}
         </tbody>
       </table>
@@ -210,6 +213,7 @@
           {% endif %}
         </div>
         {% endif %}
+      </div>
       </div>
     </div>
   </div>
@@ -277,6 +281,17 @@
     const manifestPagination = document.getElementById('manifest-pagination');
     let currentManifestPage = {{ page }};
 
+    // ---- 折叠/展开"处理记录"卡片 ----
+    const manifestToggle = document.getElementById('manifest-toggle');
+    const manifestBody = document.getElementById('manifest-body');
+    const manifestChevron = document.getElementById('manifest-chevron');
+    let manifestCollapsed = false;
+    manifestToggle.addEventListener('click', () => {
+      manifestCollapsed = !manifestCollapsed;
+      manifestBody.style.display = manifestCollapsed ? 'none' : 'block';
+      manifestChevron.style.transform = manifestCollapsed ? 'rotate(-90deg)' : 'rotate(0deg)';
+    });
+
     function escapeHtml(s) {
       return String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     }
@@ -292,17 +307,16 @@
       // 还是旧的，看起来就像"新增的列没生效"——这是导致这个问题的一个真实原因。
       const fieldNames = data.field_names || [];
       manifestHeaderRow.innerHTML =
-        '<th>时间</th><th>发件人名</th><th>发件人邮箱</th><th>主题</th><th>附件标题</th>'
+        '<th>发件人名</th><th>发件人邮箱</th><th>主题</th><th>附件标题</th>'
         + fieldNames.map(n => `<th>${escapeHtml(n)}</th>`).join('');
 
       const fieldCount = fieldNames.length;
       if (!data.entries.length) {
-        manifestTbody.innerHTML = `<tr><td colspan="${5 + fieldCount}" style="color:#999;">还没有记录</td></tr>`;
+        manifestTbody.innerHTML = `<tr><td colspan="${4 + fieldCount}" style="color:#999;">还没有记录</td></tr>`;
       } else {
         manifestTbody.innerHTML = data.entries.map(e => {
           const fieldCells = (e.fields || []).map(v => `<td>${escapeHtml(v)}</td>`).join('');
           return `<tr>
-            <td style="white-space:nowrap;">${escapeHtml(e.created_at)}</td>
             <td>${escapeHtml(e.sender_name)}</td>
             <td>${escapeHtml(e.sender_email)}</td>
             <td>${escapeHtml(e.subject)}</td>

@@ -419,7 +419,6 @@ def register_routes(app):
 
         entries_json = [
             {
-                "created_at": e.created_at.strftime("%Y-%m-%d %H:%M") if e.created_at else "",
                 "sender_name": e.sender_name,
                 "sender_email": e.sender_email,
                 "subject": e.subject,
@@ -552,7 +551,7 @@ def register_routes(app):
 
     @app.route("/export_excel")
     def export_excel():
-        """把当前所有处理记录导出成一份 Excel：时间/发件人名/发件人邮箱/主题/附件标题/下载链接，
+        """把当前所有处理记录导出成一份 Excel：发件人名/发件人邮箱/主题/附件标题/下载链接，
         后面再跟着你在"筛选条件"里配置的那几个 AI 提取字段（比如 金额/币种/container号，
         字段名和列顺序跟当前 extract_fields 配置一致）。一封命中的邮件不管有没有附件都会有
         一行，没有附件的行"附件标题"和"下载链接"留空——这样批量导出邮件标题不用依赖邮件
@@ -570,7 +569,7 @@ def register_routes(app):
         rows = ManifestEntry.query.filter_by(user_id=user.id).order_by(ManifestEntry.created_at.desc()).all()
         field_names = _split_fields(user.extract_fields)
 
-        fixed_headers = ["时间", "发件人名", "发件人邮箱", "主题", "附件标题", "下载链接"]
+        fixed_headers = ["发件人名", "发件人邮箱", "主题", "附件标题", "下载链接"]
         headers = fixed_headers + [f"{name}(AI提取)" for name in field_names]
         link_col = fixed_headers.index("下载链接") + 1
 
@@ -583,7 +582,6 @@ def register_routes(app):
             fields = e.extracted_fields
             ws.append(
                 [
-                    e.created_at.strftime("%Y-%m-%d %H:%M") if e.created_at else "",
                     e.sender_name or "",
                     e.sender_email or "",
                     e.subject or "",
@@ -597,7 +595,7 @@ def register_routes(app):
                 cell.hyperlink = link
                 cell.style = "Hyperlink"
 
-        fixed_widths = [16, 22, 28, 34, 34, 46]
+        fixed_widths = [22, 28, 34, 34, 46]
         widths = fixed_widths + [18] * len(field_names)
         for i, width in enumerate(widths, start=1):
             ws.column_dimensions[get_column_letter(i)].width = width
