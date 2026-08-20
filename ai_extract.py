@@ -159,9 +159,10 @@ def extract_fields_from_pdf(pdf_bytes, field_names):
             resp = client.messages.create(
                 model=model,
                 max_tokens=2048,
-                # 提取是"照文档抄"的活，不需要创造性，temperature 调到 0 让结果更稳定、
-                # 尽量每次读同一份文档都得到一致的答案，而不是偶尔发挥出不一样的解读。
-                temperature=0,
+                # 注意：claude-sonnet-5 等新模型已经不支持 temperature 参数了——只要请求里
+                # 带上这个字段（不管填几），就会直接报 400 "temperature is deprecated for
+                # this model"，所以这里改成不传，靠 prompt 本身（"照文档抄，不要发挥"）
+                # 来保证提取结果的稳定性。
                 messages=[
                     {
                         "role": "user",
