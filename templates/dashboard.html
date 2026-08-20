@@ -441,18 +441,47 @@
       }
     });
 
-    ajaxSubmitForm(document.getElementById('run-form'), (data) => {
-      if (data.ok && !polling) {
-        polling = setInterval(poll, 2000);
-      }
-      poll();
+    // "运行"按钮点下去之前，先把"筛选条件"这个表单（包含"启用 AI"开关、AI 字段列表）
+    // 静默保存一遍，再真正发起运行请求——不然如果用户刚改了设置（比如取消勾选"启用 AI"）
+    // 但没有另外单独点一次"保存配置"，后台读到的还是数据库里没改之前的旧设置，运行出来
+    // 的结果会跟页面上看到的配置对不上（取消勾选了 AI，实际运行时却还在调用 AI，就是
+    // 这个原因）。这样"运行"永远按当前屏幕上显示的配置来跑，不用记得先手动保存一次。
+    function submitFormAsync(form) {
+      return fetch(form.action, {
+        method: 'POST',
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
+        body: new FormData(form),
+      }).then(r => r.json());
+    }
+
+    function saveConfigThenRun(runForm, onDone) {
+      submitFormAsync(document.getElementById('config-form'))
+        .then(() => submitFormAsync(runForm))
+        .then(data => {
+          showToast(data.message, data.ok);
+          if (onDone) onDone(data);
+        })
+        .catch(err => showToast('请求失败：' + err, false));
+    }
+
+    document.getElementById('run-form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      saveConfigThenRun(document.getElementById('run-form'), (data) => {
+        if (data.ok && !polling) {
+          polling = setInterval(poll, 2000);
+        }
+        poll();
+      });
     });
 
-    ajaxSubmitForm(document.getElementById('run-titles-form'), (data) => {
-      if (data.ok && !polling) {
-        polling = setInterval(poll, 2000);
-      }
-      poll();
+    document.getElementById('run-titles-form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      saveConfigThenRun(document.getElementById('run-titles-form'), (data) => {
+        if (data.ok && !polling) {
+          polling = setInterval(poll, 2000);
+        }
+        poll();
+      });
     });
 
     ajaxSubmitForm(document.getElementById('stop-form'), () => {

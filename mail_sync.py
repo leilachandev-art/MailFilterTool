@@ -316,8 +316,14 @@ def _do_sync(app, user_id, run_id, download_attachments=True):
                 status.total_count += len(messages)
                 commit_with_retry(db.session)
 
-            for msg_index, msg in enumerate(messages):
-                if msg_index % 20 == 0 and _stop_requested(user_id):
+            for msg in messages:
+                # 以前这里是"每 20 封才查一次"，图省一点数据库查询——但现在每封邮件本身
+                # 可能就要下载附件、调 AI 提取字段，一封处理下来就要好几秒，20 封累计
+                # 下来能到几分钟，点了"停止"之后要等很久才会真的停，感觉像是没生效。
+                # 这里改成每封邮件都查一次：多出来的只是一次按主键查的轻量查询，跟一次
+                # 网络下载/AI 调用比起来完全不算什么，但停止的响应速度能从"分钟级"降到
+                # "几秒内"。
+                if _stop_requested(user_id):
                     log(app, user_id, run_id, "[已停止] 用户手动停止了本次运行。")
                     stop = True
                     break
