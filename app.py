@@ -259,7 +259,12 @@ def _query_manifest_page(user_id, page):
     /manifest 这个 AJAX 刷新接口、以及 Excel 导出共用同一份查询逻辑。"""
     page = page if page and page >= 1 else 1
 
-    q = ManifestEntry.query.filter_by(user_id=user_id).order_by(ManifestEntry.created_at.desc())
+    # 同一个附件如果按 container 拆成了好几行，这几行的 created_at 几乎一样（同一个循环里
+    # 连续插入的），只按 created_at 排序在极少数场景下可能打乱同一组的相对顺序或者分页时
+    # 抖动；加个 id 兜底排序，保证同一份附件拆出来的几行分页顺序稳定、挨在一起。
+    q = ManifestEntry.query.filter_by(user_id=user_id).order_by(
+        ManifestEntry.created_at.desc(), ManifestEntry.id.desc()
+    )
     total = q.count()
     total_pages = max(1, (total + RECORDS_PAGE_SIZE - 1) // RECORDS_PAGE_SIZE)
     page = min(page, total_pages)
@@ -572,7 +577,11 @@ def register_routes(app):
             flash("服务器还没装 openpyxl，导出不了 Excel。请执行 pip install -r requirements.txt 后重启。")
             return redirect(url_for("dashboard"))
 
-        rows = ManifestEntry.query.filter_by(user_id=user.id).order_by(ManifestEntry.created_at.desc()).all()
+        rows = (
+            ManifestEntry.query.filter_by(user_id=user.id)
+            .order_by(ManifestEntry.created_at.desc(), ManifestEntry.id.desc())
+            .all()
+        )
         field_names = _split_fields(user.extract_fields)
 
         fixed_headers = ["发件人名", "发件人邮箱", "主题", "附件标题", "下载链接", "备注"]

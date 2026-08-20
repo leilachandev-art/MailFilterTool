@@ -10,9 +10,12 @@ Claude，把这些字段的值抠出来，不管发票排版长什么样，AI �
 需要在 .env 里配置 ANTHROPIC_API_KEY 才能用；没配置的话这个功能自动跳过
 （附件本身照常下载，只是提取字段那几列留空)。
 
-用法：extract_fields_from_pdf(pdf_bytes, field_names) -> (result_dict, error_message_or_None)
-调用方（mail_sync.py）应该把 error_message 记到运行日志里——不然调用失败时用户只会看到
-"提取字段全是空的"，完全不知道是哪一步出的问题（没装包？Key 不对？模型名不对？配额用完？）。
+用法：extract_line_items_from_pdf(pdf_bytes, field_names) -> (items_list, error_message_or_None)
+一份 PDF 可能同时涉及好几个 container（或者除 container 费用外还有别的杂项费用），所以返回
+的是一个列表，每一条对应一个 container（或"其他费用"这一组）；最常见的单 container 场景，
+列表就只有一条，跟"一份 PDF 一组字段值"是一回事。调用方（mail_sync.py）应该把 error_message
+记到运行日志里——不然调用失败时用户只会看到"提取字段全是空的"，完全不知道是哪一步出的问题
+（没装包？Key 不对？模型名不对？配额用完？）。
 
 用法：diagnose() -> str|None，返回"当前配置不满足什么条件"的说明，None 表示配置齐全，
 可以在运行前先检查一次，比每份 PDF 都失败一次才发现问题更快。
@@ -113,41 +116,70 @@ def diagnose():
     return None
 
 
-def extract_fields_from_pdf(pdf_bytes, field_names):
+def extract_line_items_from_pdf(pdf_bytes, field_names):
     """field_names 是字段名列表，比如 ["发票号", "金额", "币种", "container号"]。
-    返回 (result, error)：result 是 dict，每个字段的值是字符串或 None（文档里确实没有 /
-    模型不确定）；error 是 None（成功）或者一句话错误描述（调用失败/解析失败），
-    调用方应该把 error 记到运行日志里，方便排查，而不是默默吞掉。"""
-    result = {name: None for name in field_names}
+    跟早期版本的区别：不再假设"一份 PDF 附件只对应一组字段值"——实际业务里，供应商发来的
+    账单可能只涉及一个 container，也可能同时涉及好几个 container，还可能除了 container 相关
+    费用外，另外还有一些不属于任何具体 container 的杂项费用（文件费、操作费之类）。
+    如果 field_names 里配了个"container 号"这一类字段（靠字段名关键词识别，不用用户特意配置
+    别的开关），会让 AI 按 container 分组，每个 container（以及"其他费用"这一组，如果有的话）
+    各自作为返回列表里单独的一条；没配 container 类字段、或者文档本身就只有一组的话，
+    返回列表就只有一条，跟旧版本单个 dict 的效果一样，调用方不用为"只有一个 container"这种
+    最常见的情况特殊处理。
+    返回 (items, error)：items 是 list[dict]，至少有一条（哪怕全是 None），每条 dict 的 key
+    跟传入的 field_names 完全一致，value 是字符串或 None；error 是 None（成功）或者一句话
+    错误描述（调用失败/解析失败/container 校验位不通过的提示），调用方应该把 error 记到运行
+    日志里，方便排查，而不是默默吞掉。"""
+    empty_item = {name: None for name in field_names}
     if not field_names:
-        return result, None
+        return [dict(empty_item)], None
 
     reason = diagnose()
     if reason:
-        return result, reason
+        return [dict(empty_item)], reason
 
     client = _get_client()
     if not client:
-        return result, "无法创建 Anthropic 客户端（不应该发生，如果看到这条请检查 ANTHROPIC_API_KEY）。"
+        return [dict(empty_item)], "无法创建 Anthropic 客户端（不应该发生，如果看到这条请检查 ANTHROPIC_API_KEY）。"
 
     field_list_str = "、".join(field_names)
+    container_field = next((n for n in field_names if _looks_like_container_field(n)), None)
+
+    if container_field:
+        grouping_instruction = (
+            f"\n重要——分组规则：这份文档可能只涉及一个 container（集装箱），也可能同时涉及多个不同的\n"
+            f"container，还可能除了这些 container 相关的费用外，另外还有一些不属于任何具体 container 的\n"
+            f"费用（比如文件费、操作费、其他附加费等杂项/共同费用）。请按「{container_field}」分组：\n"
+            f"- 同一个 container 名下的所有费用行，作为数组里单独一条；\n"
+            f"- 所有不属于任何具体 container 的费用，合并成额外的一条，这一条的「{container_field}」填 null\n"
+            f"  （不要为了凑数瞎编一个 container 号）；如果文档里所有费用都能归到某个 container 名下，\n"
+            f"  没有这种杂项费用，就不要输出这一条。\n"
+            f"- 每一条里，跟这个分组直接相关的字段（比如这个 container 名下的金额）只填这一组自己的值，\n"
+            f"  不要把别的 container 的金额也算进来、也不要重复计算；跟整份文档相关、不区分 container 的\n"
+            f"  字段（比如发票号、开票日期、供应商名称这类文档级信息），每一条都填一样的值。\n"
+            f"- 只有一个 container、且没有其他杂项费用的话，数组就只有一条，正常情况。\n"
+        )
+    else:
+        grouping_instruction = "\n请把整份文档当成一组，只输出一个元素的数组。\n"
+
     prompt = (
         f"这是一份物流/发票类 PDF 文档。请从中提取以下字段的值：{field_list_str}。\n"
         f"在给出最终答案前，请先在心里把文档通读一遍、定位每个字段在文档里具体对应哪个数字/哪段文字，\n"
         f"再逐个核对一遍，确认没有认错行、认错列、张冠李戴，然后再输出最终结果。\n"
+        f"{grouping_instruction}"
         f"要求：\n"
-        f"1. 只返回一个 JSON 对象，key 必须跟我给的字段名完全一致，value 是提取到的值（字符串）。\n"
+        f"1. 返回一个 JSON 数组，数组每一项是一个 JSON 对象，对象的 key 必须跟我给的字段名完全一致，\n"
+        f"value 是提取到的值（字符串）。\n"
         f"2. 如果某个字段在文档里确实找不到，或者你不确定，对应 value 填 null，不要瞎猜、不要编造、"
         f"不要因为「必须给个答案」就选一个不太确定的候选值——错误答案比留空更糟。\n"
         f"3. 金额类字段：只填数字本身（不要带货币符号、不要千分位逗号）；如果字段名没有明确指定是「小计/税金/定金」\n"
-        f"这类局部金额，默认取文档里最终应付的总金额（Grand Total / Total Due / Amount Due / 合计 /\n"
-        f"应付金额这一类，通常在文档最下方或金额汇总区域），不要跟半路的小计、单价、税额搞混。\n"
+        f"这类局部金额，默认取这一条自己对应的最终应付金额，不要跟别的组的金额混在一起、也不要跟半路的\n"
+        f"小计、单价、税额搞混。\n"
         f"4. 币种类字段：填三位标准货币代码（如 USD/CAD/CNY），不要填货币符号或全称。\n"
         f"5. 日期类字段：统一按 YYYY-MM-DD 格式输出，不管文档里原始是什么格式。\n"
         f"6. container(集装箱)号类字段：严格按文档上印刷的原样输出，通常是 4 个大写字母紧跟 7 位数字\n"
         f"（比如 EMCU1234567），字母和数字中间不要加空格/横线，也不要把提单号、订单号等其他编号误当成它。\n"
-        f"7. 如果某个字段在文档里有多个值（比如多个 container 号），用英文逗号分隔全部列出，不要遗漏也不要重复。\n"
-        f"8. 除了这个 JSON，不要输出任何其他文字、不要加 ```json 代码块标记。"
+        f"7. 除了这个 JSON 数组，不要输出任何其他文字、不要加 ```json 代码块标记。"
     )
 
     error = None
@@ -158,7 +190,7 @@ def extract_fields_from_pdf(pdf_bytes, field_names):
         with _CONCURRENCY_GATE:
             resp = client.messages.create(
                 model=model,
-                max_tokens=2048,
+                max_tokens=4096,
                 # 注意：claude-sonnet-5 等新模型已经不支持 temperature 参数了——只要请求里
                 # 带上这个字段（不管填几），就会直接报 400 "temperature is deprecated for
                 # this model"，所以这里改成不传，靠 prompt 本身（"照文档抄，不要发挥"）
@@ -196,9 +228,10 @@ def extract_fields_from_pdf(pdf_bytes, field_names):
         error = f"调用 Anthropic API 失败：{type(e).__name__}: {e}"
 
     if error:
-        return result, error
+        return [dict(empty_item)], error
 
-    # 走到这里说明 API 调用成功了，剩下的是"模型返回的文本能不能解析成 JSON"这一步。
+    # 走到这里说明 API 调用成功了，剩下的是"模型返回的文本能不能解析成 JSON 数组"这一步。
+    MAX_ITEMS = 100  # 安全阀，防止模型异常输出（比如把每一行费用都拆成单独一条）炸出太多记录
     try:
         # 万一模型还是加了 ```json 代码块标记，简单剥掉，避免 json.loads 报错。
         if text.startswith("```"):
@@ -208,29 +241,45 @@ def extract_fields_from_pdf(pdf_bytes, field_names):
             text = text.strip()
 
         data = json.loads(text)
-        for name in field_names:
-            val = data.get(name)
-            if val is not None:
-                val = str(val).strip()
-                if val and val.lower() != "null":
-                    result[name] = val
+        if isinstance(data, dict):
+            # 模型没按数组格式返回（比如只有一个 container 时偷懒直接返回了单个对象），
+            # 兼容一下当成只有一条的数组处理，不算错误——这种情况其实也不算少见。
+            data = [data]
+        if not isinstance(data, list) or not data:
+            raise ValueError("返回的不是非空 JSON 数组")
+
+        items = []
+        for raw_item in data[:MAX_ITEMS]:
+            if not isinstance(raw_item, dict):
+                continue
+            item = dict(empty_item)
+            for name in field_names:
+                val = raw_item.get(name)
+                if val is not None:
+                    val = str(val).strip()
+                    if val and val.lower() != "null":
+                        item[name] = val
+            items.append(item)
+        if not items:
+            raise ValueError("数组里没有能用的 JSON 对象")
     except Exception as e:
         preview = (text or "")[:200]
-        error = f"模型返回的内容不是合法 JSON，解析失败：{e}。原始返回（截断）：{preview!r}"
+        return [dict(empty_item)], f"模型返回的内容不是合法 JSON 数组，解析失败：{e}。原始返回（截断）：{preview!r}"
 
-    if not error:
-        # container 号这类字段格式很固定（ISO 6346 有校验位），能用算法客观核实的就顺手核实一下，
-        # 不是为了拦截/覆盖 AI 给的答案（万一是算法本身的边界情况误判，不该让用户平白少一条数据），
-        # 只是校验不通过时提醒一声，让人多留个心眼去核对原件，比什么提示都没有强。
-        bad_values = []
+    # container 号这类字段格式很固定（ISO 6346 有校验位），能用算法客观核实的就顺手核实一下，
+    # 不是为了拦截/覆盖 AI 给的答案（万一是算法本身的边界情况误判，不该让用户平白少一条数据），
+    # 只是校验不通过时提醒一声，让人多留个心眼去核对原件，比什么提示都没有强。
+    bad_values = []
+    for item in items:
         for name in field_names:
-            if not _looks_like_container_field(name) or not result[name]:
+            if not _looks_like_container_field(name) or not item.get(name):
                 continue
-            for v in [p.strip() for p in result[name].split(",") if p.strip()]:
+            for v in [p.strip() for p in item[name].split(",") if p.strip()]:
                 compact = v.replace(" ", "").replace("-", "")
                 if not _container_checksum_valid(compact):
                     bad_values.append(f"{name}={v}")
-        if bad_values:
-            error = f"提示：{'、'.join(bad_values)} 没通过 container 号的校验位算法，建议核对一下原附件（不影响其他字段，已正常记录）。"
+    warn = None
+    if bad_values:
+        warn = f"提示：{'、'.join(bad_values)} 没通过 container 号的校验位算法，建议核对一下原附件（不影响其他字段，已正常记录）。"
 
-    return result, error
+    return items, warn

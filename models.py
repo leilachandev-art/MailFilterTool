@@ -71,8 +71,11 @@ class ProcessedMessage(db.Model):
 
 
 class ManifestEntry(db.Model):
-    """命中筛选条件的邮件清单：一封邮件如果有附件，每个附件各一行；如果没有附件，
-    也会生成一行(original_filename/saved_filename 留空)，保证邮件标题不会因为没有附件而漏掉，
+    """命中筛选条件的邮件清单：一封邮件如果有附件，每个附件至少一行——如果这份附件（账单）
+    同时涉及多个 container，AI 提取时会按 container 拆分，一个附件在这种情况下会对应好几行
+    （每行一个 container 各自的字段值），共用同一个 saved_filename/下载链接，方便按 container
+    对账，不用自己再从一份合并账单里手动拆分金额；如果没有附件，也会生成一行
+    (original_filename/saved_filename 留空)，保证邮件标题不会因为没有附件而漏掉，
     方便批量导出标题到 Excel 做后续处理。"""
 
     id = db.Column(db.Integer, primary_key=True)
