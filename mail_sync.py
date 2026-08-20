@@ -8,6 +8,7 @@ Zoho 语法不支持的反向条件，最后把符合条件的附件下载到服
 用法：run_sync_for_user(flask_app, user_id, run_id) 在后台线程里调用。
 """
 
+import hashlib
 import os
 import re
 import shutil
@@ -257,6 +258,17 @@ def _do_sync(app, user_id, run_id, download_attachments=True):
             row.uid for row in ProcessedMessage.query.filter_by(user_id=user.id).all()
         }
 
+        # 内容去重用：hash -> 这一组里"正主"（发送时间最新、真正保存了文件的那一条）的
+        # ManifestEntry。先一次性查出来放内存里，后面每个附件算完哈希直接查这个 dict，
+        # 不用每个附件都单独查一次数据库；组内谁是正主发生变化时（发现了发送时间更新的
+        # 同内容附件）也在内存里同步更新，不用重新查库。
+        canonical_by_hash = {
+            row.content_hash: row
+            for row in ManifestEntry.query.filter_by(user_id=user.id, is_duplicate=False)
+            .filter(ManifestEntry.content_hash.isnot(None))
+            .all()
+        }
+
         status = RunStatus.query.get(user_id)
 
         new_saved = 0
@@ -264,8 +276,18 @@ def _do_sync(app, user_id, run_id, download_attachments=True):
         matched_with_attachment_flag = 0
         skipped = 0
         excluded = 0
+        duplicate_attachments = 0
         checked = 0
         stop = False
+
+        def _parse_mail_epoch(value):
+            """sentDateInGMT 正常情况下是毫秒级时间戳字符串，转不了数字就当"不确定"，
+            返回 None——遇到 None 时，比较发送时间新旧这一步会保守地不去"提正主"，
+            避免因为个别邮件的时间格式异常而误判谁是最新版本。"""
+            try:
+                return int(str(value).strip())
+            except (TypeError, ValueError):
+                return None
 
         for page in range(MAX_PAGES):
             if stop:
@@ -348,43 +370,112 @@ def _do_sync(app, user_id, run_id, download_attachments=True):
                                 access_token, user.zoho_api_domain, user.zoho_account_id,
                                 msg_folder_id, message_id, a.get("attachmentId"),
                             )
+                            content_hash = hashlib.sha256(content).hexdigest()
+                            canonical = canonical_by_hash.get(content_hash)
 
-                            saved_path = _save_local(download_dir, filename, content)
-                            saved_filename = os.path.basename(saved_path)
-
-                            # 只对 PDF 附件调用 AI 按用户自定义的字段名提取；没配置好的话
-                            # extract_fields_from_pdf 会带着具体原因回来，记进日志方便排查，
-                            # 不管提取成不成功都不影响附件本身已经下载成功这件事。
-                            extracted_fields = {}
-                            if filename.lower().endswith(".pdf") and extract_field_names:
-                                extracted_fields, extract_error = ai_extract.extract_fields_from_pdf(
-                                    content, extract_field_names
-                                )
-                                if extract_error:
-                                    # extract_error 不一定是"失败"——也可能是提取成功了，但某个值没通过
-                                    # 格式校验（比如 container 号校验位不对）这种"建议人工核对一下"的提示，
-                                    # 所以这里措辞不要预设成"没成功"，具体是哪种情况看 extract_error 内容。
-                                    log(app, user_id, run_id, f"[提示] 附件 {filename} 的 AI 提取：{extract_error}（附件本身已正常下载）")
-
-                            new_saved += 1
-                            new_matched += 1
-                            if status:
-                                status.saved_count = new_saved
-                                status.matched_count = new_matched
-                            entry = ManifestEntry(
-                                user_id=user.id,
-                                run_id=run_id,
-                                uid=message_id,
-                                original_filename=filename,
-                                saved_filename=saved_filename,
-                                sender_name=sender_name,
-                                sender_email=sender_email,
-                                subject=subject,
-                                mail_date=mail_date,
-                                message_id=message_id,
+                            # 判断这一份跟已经见过的同内容附件比，谁的发送时间更新——
+                            # 只有"目前最新"的那一份才会真正落盘、调用 AI；较旧的那些
+                            # 标成重复，不重复占存储、不重复花 AI 调用的钱，但这封邮件
+                            # 本身还是单独成一行，不会从处理记录里彻底消失。
+                            this_epoch = _parse_mail_epoch(mail_date)
+                            canon_epoch = _parse_mail_epoch(canonical.mail_date) if canonical else None
+                            promote = (
+                                canonical is not None
+                                and this_epoch is not None
+                                and canon_epoch is not None
+                                and this_epoch > canon_epoch
                             )
-                            entry.extracted_fields = extracted_fields
-                            db.session.add(entry)
+                            is_new_canonical = canonical is None or promote
+
+                            if is_new_canonical:
+                                saved_path = _save_local(download_dir, filename, content)
+                                saved_filename = os.path.basename(saved_path)
+
+                                if canonical is not None:
+                                    # 之前那份是"正主"，现在发现了发送时间更新的同内容附件，
+                                    # 内容既然完全一样就不用再花钱调一次 AI，直接把之前提取
+                                    # 好的结果搬过来用；同时把旧正主标成重复，指向新正主。
+                                    extracted_fields = dict(canonical.extracted_fields)
+                                    duplicate_attachments += 1
+                                    log(
+                                        app, user_id, run_id,
+                                        f"[提示] 附件 {filename} 与之前处理过的一份内容相同，但这封邮件发送时间更新，"
+                                        f"已改为保留这一份（原来那份改标记为重复）。",
+                                    )
+                                else:
+                                    # 只对 PDF 附件调用 AI 按用户自定义的字段名提取；没配置好的话
+                                    # extract_fields_from_pdf 会带着具体原因回来，记进日志方便排查，
+                                    # 不管提取成不成功都不影响附件本身已经下载成功这件事。
+                                    extracted_fields = {}
+                                    if filename.lower().endswith(".pdf") and extract_field_names:
+                                        extracted_fields, extract_error = ai_extract.extract_fields_from_pdf(
+                                            content, extract_field_names
+                                        )
+                                        if extract_error:
+                                            # extract_error 不一定是"失败"——也可能是提取成功了，但某个值没通过
+                                            # 格式校验（比如 container 号校验位不对）这种"建议人工核对一下"的提示，
+                                            # 所以这里措辞不要预设成"没成功"，具体是哪种情况看 extract_error 内容。
+                                            log(app, user_id, run_id, f"[提示] 附件 {filename} 的 AI 提取：{extract_error}（附件本身已正常下载）")
+
+                                new_saved += 1
+                                new_matched += 1
+                                if status:
+                                    status.saved_count = new_saved
+                                    status.matched_count = new_matched
+                                entry = ManifestEntry(
+                                    user_id=user.id,
+                                    run_id=run_id,
+                                    uid=message_id,
+                                    original_filename=filename,
+                                    saved_filename=saved_filename,
+                                    sender_name=sender_name,
+                                    sender_email=sender_email,
+                                    subject=subject,
+                                    mail_date=mail_date,
+                                    message_id=message_id,
+                                    content_hash=content_hash,
+                                    is_duplicate=False,
+                                )
+                                entry.extracted_fields = extracted_fields
+                                db.session.add(entry)
+                                # 立刻 flush 拿到这一行的 id——不管是不是"顶替"了旧正主，
+                                # 万一同一封邮件里还有别的附件跟这份内容一样（或者同一批
+                                # 消息里紧接着还有别的邮件命中同一个哈希），后面马上就要用
+                                # 这个 id 当 duplicate_of_id，不 flush 的话这里还是 None。
+                                db.session.flush()
+                                if canonical is not None:
+                                    canonical.is_duplicate = True
+                                    canonical.duplicate_of_id = entry.id
+                                canonical_by_hash[content_hash] = entry
+                            else:
+                                # 内容跟已有的正主一样，且发送时间没有更新：不重复下载落盘、
+                                # 不重复调用 AI，直接复用正主已经提取好的字段值，这一行只
+                                # 标记为"重复"，下载链接会指向正主那一行的文件。
+                                duplicate_attachments += 1
+                                new_matched += 1
+                                if status:
+                                    status.matched_count = new_matched
+                                log(
+                                    app, user_id, run_id,
+                                    f"[提示] 附件 {filename} 与另一封邮件的附件内容相同，已保留发送时间更晚的那份，本行标记为重复。",
+                                )
+                                entry = ManifestEntry(
+                                    user_id=user.id,
+                                    run_id=run_id,
+                                    uid=message_id,
+                                    original_filename=filename,
+                                    saved_filename=None,
+                                    sender_name=sender_name,
+                                    sender_email=sender_email,
+                                    subject=subject,
+                                    mail_date=mail_date,
+                                    message_id=message_id,
+                                    content_hash=content_hash,
+                                    is_duplicate=True,
+                                    duplicate_of_id=canonical.id,
+                                )
+                                entry.extracted_fields = dict(canonical.extracted_fields)
+                                db.session.add(entry)
                     else:
                         # 没有附件：也要记一行，只填标题/发件人/日期，方便批量导出邮件标题
                         # 到 Excel 做后续处理（比如从标题里解析 container 号）。
@@ -422,6 +513,8 @@ def _do_sync(app, user_id, run_id, download_attachments=True):
 
         if download_attachments:
             log(app, user_id, run_id, f"完成：检查了 {checked} 封搜索结果，排除 {excluded} 封（命中发件人排除词），命中 {new_matched} 封邮件，其中下载附件 {new_saved} 个")
+            if duplicate_attachments:
+                log(app, user_id, run_id, f"其中 {duplicate_attachments} 个附件与其他邮件内容重复，已标记为重复行（未重复下载/未重复调用 AI）")
         else:
             log(app, user_id, run_id, f"完成（仅导出标题模式，未下载附件）：检查了 {checked} 封搜索结果，排除 {excluded} 封（命中发件人排除词），命中 {new_matched} 封邮件，其中 {matched_with_attachment_flag} 封本身带附件（未下载）")
         if skipped:

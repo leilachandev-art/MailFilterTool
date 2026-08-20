@@ -423,7 +423,13 @@ def register_routes(app):
                 "sender_email": e.sender_email,
                 "subject": e.subject,
                 "filename": e.original_filename,
-                "download_url": url_for("download_attachment", entry_id=e.id) if e.saved_filename else None,
+                # 重复行自己没存文件，下载链接复用"正主"那一行的（内容完全一样）。
+                "download_url": (
+                    url_for("download_attachment", entry_id=e.duplicate_of_id)
+                    if e.is_duplicate and e.duplicate_of_id
+                    else url_for("download_attachment", entry_id=e.id) if e.saved_filename else None
+                ),
+                "is_duplicate": bool(e.is_duplicate),
                 "fields": [e.extracted_fields.get(name) for name in field_names],
             }
             for e in rows
@@ -569,7 +575,7 @@ def register_routes(app):
         rows = ManifestEntry.query.filter_by(user_id=user.id).order_by(ManifestEntry.created_at.desc()).all()
         field_names = _split_fields(user.extract_fields)
 
-        fixed_headers = ["发件人名", "发件人邮箱", "主题", "附件标题", "下载链接"]
+        fixed_headers = ["发件人名", "发件人邮箱", "主题", "附件标题", "下载链接", "备注"]
         headers = fixed_headers + [f"{name}(AI提取)" for name in field_names]
         link_col = fixed_headers.index("下载链接") + 1
 
@@ -578,7 +584,11 @@ def register_routes(app):
         ws.title = "处理记录"
         ws.append(headers)
         for e in rows:
-            link = url_for("download_attachment", entry_id=e.id, _external=True) if e.saved_filename else ""
+            # 重复行自己没存文件，下载链接复用"正主"那一行的（内容完全一样）。
+            link_entry_id = e.duplicate_of_id if (e.is_duplicate and e.duplicate_of_id) else e.id
+            has_file = bool(e.saved_filename) or bool(e.is_duplicate and e.duplicate_of_id)
+            link = url_for("download_attachment", entry_id=link_entry_id, _external=True) if has_file else ""
+            note = "重复（内容与另一封邮件相同，已保留发送时间更晚的那份）" if e.is_duplicate else ""
             fields = e.extracted_fields
             ws.append(
                 [
@@ -587,6 +597,7 @@ def register_routes(app):
                     e.subject or "",
                     e.original_filename or "",
                     link,
+                    note,
                 ]
                 + [fields.get(name) or "" for name in field_names]
             )
@@ -595,7 +606,7 @@ def register_routes(app):
                 cell.hyperlink = link
                 cell.style = "Hyperlink"
 
-        fixed_widths = [22, 28, 34, 34, 46]
+        fixed_widths = [22, 28, 34, 34, 46, 34]
         widths = fixed_widths + [18] * len(field_names)
         for i, width in enumerate(widths, start=1):
             ws.column_dimensions[get_column_letter(i)].width = width

@@ -83,6 +83,17 @@ class ManifestEntry(db.Model):
     original_filename = db.Column(db.String(500))  # 附件原始文件名，用于显示
     saved_filename = db.Column(db.String(500))  # 实际存在服务器临时目录里的文件名（重名时会加序号后缀）
 
+    # 附件内容的 SHA256，用来判断"内容完全相同的附件"（同一份发票被转发/抄送/重复
+    # 发送，虽然是不同邮件、不同 messageId，但内容一样）。按用户维度查重：内容相同的
+    # 一组里，只有发送时间最新的那一封会真正保存文件、调用 AI 提取（is_duplicate=False，
+    # 也就是"这一组的正主"）；其余发送时间更早的都标成 is_duplicate=True，不重复占用
+    # 磁盘、不重复调用 AI，但这些邮件本身还是各自成一行，不会从处理记录里消失——
+    # duplicate_of_id 指向正主那一行，前端下载按钮会复用正主的文件。
+    # 没有附件的邮件（只记标题那种）这两个字段都是 None/False。
+    content_hash = db.Column(db.String(64), nullable=True, index=True)
+    is_duplicate = db.Column(db.Boolean, default=False)
+    duplicate_of_id = db.Column(db.Integer, nullable=True)
+
     sender_name = db.Column(db.String(500))  # 发件人显示名
     sender_email = db.Column(db.String(500))  # 发件人邮箱地址
     subject = db.Column(db.String(1000))

@@ -173,7 +173,7 @@
       <table>
         <thead>
           <tr id="manifest-header-row">
-            <th>发件人名</th><th>发件人邮箱</th><th>主题</th><th>附件标题</th>
+            <th>发件人名</th><th>发件人邮箱</th><th>主题</th><th>附件标题</th><th>备注</th>
             {% for name in extract_field_names %}<th>{{ name }}</th>{% endfor %}
           </tr>
         </thead>
@@ -183,16 +183,23 @@
             <td>{{ e.sender_name }}</td>
             <td>{{ e.sender_email }}</td>
             <td>{{ e.subject }}</td>
-            {% if e.saved_filename %}
+            {% if e.is_duplicate and e.duplicate_of_id %}
+            <td><a class="link" href="{{ url_for('download_attachment', entry_id=e.duplicate_of_id) }}">{{ e.original_filename }}</a></td>
+            {% elif e.saved_filename %}
             <td><a class="link" href="{{ url_for('download_attachment', entry_id=e.id) }}">{{ e.original_filename }}</a></td>
             {% else %}
             <td style="color:#999;">（无附件）</td>
+            {% endif %}
+            {% if e.is_duplicate %}
+            <td><span style="font-size:12.5px; color:var(--color-text-faint);">重复（已保留发送时间更晚的一份）</span></td>
+            {% else %}
+            <td></td>
             {% endif %}
             {% set fields = e.extracted_fields %}
             {% for name in extract_field_names %}<td>{{ fields.get(name) or '' }}</td>{% endfor %}
           </tr>
           {% else %}
-          <tr><td colspan="{{ 4 + extract_field_names|length }}" style="color:#999;">还没有记录</td></tr>
+          <tr><td colspan="{{ 5 + extract_field_names|length }}" style="color:#999;">还没有记录</td></tr>
           {% endfor %}
         </tbody>
       </table>
@@ -307,20 +314,24 @@
       // 还是旧的，看起来就像"新增的列没生效"——这是导致这个问题的一个真实原因。
       const fieldNames = data.field_names || [];
       manifestHeaderRow.innerHTML =
-        '<th>发件人名</th><th>发件人邮箱</th><th>主题</th><th>附件标题</th>'
+        '<th>发件人名</th><th>发件人邮箱</th><th>主题</th><th>附件标题</th><th>备注</th>'
         + fieldNames.map(n => `<th>${escapeHtml(n)}</th>`).join('');
 
       const fieldCount = fieldNames.length;
       if (!data.entries.length) {
-        manifestTbody.innerHTML = `<tr><td colspan="${4 + fieldCount}" style="color:#999;">还没有记录</td></tr>`;
+        manifestTbody.innerHTML = `<tr><td colspan="${5 + fieldCount}" style="color:#999;">还没有记录</td></tr>`;
       } else {
         manifestTbody.innerHTML = data.entries.map(e => {
           const fieldCells = (e.fields || []).map(v => `<td>${escapeHtml(v)}</td>`).join('');
+          const noteCell = e.is_duplicate
+            ? '<td><span style="font-size:12.5px; color:var(--color-text-faint);">重复（已保留发送时间更晚的一份）</span></td>'
+            : '<td></td>';
           return `<tr>
             <td>${escapeHtml(e.sender_name)}</td>
             <td>${escapeHtml(e.sender_email)}</td>
             <td>${escapeHtml(e.subject)}</td>
             <td>${e.download_url ? `<a class="link" href="${e.download_url}">${escapeHtml(e.filename)}</a>` : '<span style="color:#999;">（无附件）</span>'}</td>
+            ${noteCell}
             ${fieldCells}
           </tr>`;
         }).join('');
