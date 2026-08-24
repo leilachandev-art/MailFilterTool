@@ -92,8 +92,9 @@
         </div>
         <input type="hidden" name="extract_fields" id="extract-fields-hidden">
 
-        <div style="margin-top: 18px;">
+        <div style="margin-top: 18px; display: flex; align-items: center; gap: 10px;">
           <button class="btn" type="submit">保存配置</button>
+          <span id="config-autosave-indicator" style="font-size: 13px; color: var(--color-text-faint, #888); opacity: 0; transition: opacity 0.4s;"></span>
         </div>
       </form>
     </div>
@@ -118,19 +119,7 @@
           停止运行
         </button>
       </form>
-      <form method="post" action="{{ url_for('clear_processed') }}" id="clear-form" style="display:inline; margin-left:8px;">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-        <button class="btn btn-secondary" type="submit" id="clear-btn" {% if status and status.is_running %}disabled{% endif %}>
-          清空处理记录
-        </button>
-      </form>
-      <form method="post" action="{{ url_for('clear_manifest') }}" id="clear-manifest-form" style="display:inline; margin-left:8px;">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-        <button class="btn btn-secondary" type="submit" id="clear-manifest-btn" {% if status and status.is_running %}disabled{% endif %}>
-          清空附件历史
-        </button>
-      </form>
-      <p class="hint">改了筛选条件后，之前扫描过但没命中的邮件不会自动重新检查。如需重新全量扫描，点"清空处理记录"。"清空附件历史"清的是下面那张可见的表格（已保存附件的溯源记录），两个按钮互不影响。</p>
+      <p class="hint">点"运行"会自动清空之前的处理记录和附件历史，重新全量扫描一遍符合筛选条件的邮件（已经下载过的附件也会重新下载、PDF 会重新调用一次 AI 提取），不是增量扫描，请留意这会重新产生 AI 调用费用；如果之前累积的处理记录还没导出 Excel，建议运行前先导出。</p>
 
       {% if is_admin %}
       <div id="progress-line" style="display:none; margin-top:14px; font-size:13px; color:#333;">
@@ -262,8 +251,6 @@
     const runBtn = document.getElementById('run-btn');
     const runTitlesBtn = document.getElementById('run-titles-btn');
     const stopBtn = document.getElementById('stop-btn');
-    const clearBtn = document.getElementById('clear-btn');
-    const clearManifestBtn = document.getElementById('clear-manifest-btn');
     const progressLine = document.getElementById('progress-line');
     const progressChecked = document.getElementById('progress-checked');
     const progressMatched = document.getElementById('progress-matched');
@@ -402,8 +389,6 @@
             runTitlesBtn.disabled = true;
             runTitlesBtn.textContent = "运行中...";
             stopBtn.classList.remove('inactive');
-            clearBtn.disabled = true;
-            clearManifestBtn.disabled = true;
             downloadReady.style.display = 'none';
           } else {
             runBtn.disabled = false;
@@ -411,8 +396,6 @@
             runTitlesBtn.disabled = false;
             runTitlesBtn.textContent = "仅导出标题（不下载附件，更快）";
             stopBtn.classList.add('inactive');
-            clearBtn.disabled = false;
-            clearManifestBtn.disabled = false;
             if (data.download_url) {
               downloadLink.href = data.download_url;
               downloadReady.style.display = 'block';
@@ -464,11 +447,31 @@
         .catch(err => showToast('请求失败：' + err, false));
     }
 
+    // 点"运行"后台会自动清空之前的处理记录/附件历史再全量重扫，页面上也跟着重置成
+    // 初始状态（不然还留着上一次运行的旧日志/进度/下载链接/表格数据，跟"已经清空"
+    // 的实际状态对不上，会误导人）。
+    function resetRunDisplayAndManifest() {
+      if (logBox) logBox.textContent = '（日志会在运行时显示在这里）';
+      if (progressChecked) progressChecked.textContent = '0';
+      if (progressMatched) progressMatched.textContent = '0';
+      if (progressSaved) progressSaved.textContent = '0';
+      if (progressLine) progressLine.style.display = 'none';
+      if (simpleProgressWrap) simpleProgressWrap.style.display = 'none';
+      if (simpleStatusText) {
+        simpleStatusDot.style.background = '#9ca3af';
+        simpleStatusText.textContent = '运行状态：待运行';
+      }
+      downloadReady.style.display = 'none';
+      currentManifestPage = 1;
+      refreshManifest();
+    }
+
     document.getElementById('run-form').addEventListener('submit', (e) => {
       e.preventDefault();
       saveConfigThenRun(document.getElementById('run-form'), (data) => {
-        if (data.ok && !polling) {
-          polling = setInterval(poll, 2000);
+        if (data.ok) {
+          resetRunDisplayAndManifest();
+          if (!polling) polling = setInterval(poll, 2000);
         }
         poll();
       });
@@ -477,8 +480,9 @@
     document.getElementById('run-titles-form').addEventListener('submit', (e) => {
       e.preventDefault();
       saveConfigThenRun(document.getElementById('run-titles-form'), (data) => {
-        if (data.ok && !polling) {
-          polling = setInterval(poll, 2000);
+        if (data.ok) {
+          resetRunDisplayAndManifest();
+          if (!polling) polling = setInterval(poll, 2000);
         }
         poll();
       });
@@ -488,46 +492,6 @@
       if (!polling) polling = setInterval(poll, 2000);
       poll();
     });
-
-    ajaxSubmitForm(document.getElementById('clear-form'), (data) => {
-      if (data.ok) {
-        // 清空处理记录后，运行模块里显示的是上一次运行留下的旧日志/进度/下载链接，
-        // 跟"已清空"的状态对不上了，这里跟着重置成初始状态，避免误导。
-        if (logBox) logBox.textContent = '（日志会在运行时显示在这里）';
-        if (progressChecked) progressChecked.textContent = '0';
-        if (progressMatched) progressMatched.textContent = '0';
-        if (progressSaved) progressSaved.textContent = '0';
-        if (progressLine) progressLine.style.display = 'none';
-        if (simpleProgressWrap) simpleProgressWrap.style.display = 'none';
-        if (simpleStatusText) {
-          simpleStatusDot.style.background = '#9ca3af';
-          simpleStatusText.textContent = '运行状态：待运行';
-        }
-        downloadReady.style.display = 'none';
-      }
-    });
-
-    document.getElementById('clear-form').addEventListener('submit', (e) => {
-      if (!confirm('确定要清空处理记录吗？清空后下次运行会重新扫描所有历史邮件，之前已经保存过的附件可能会重复保存一份。')) {
-        e.stopImmediatePropagation();
-        e.preventDefault();
-      }
-    }, true); // capture 阶段先跑，拦下不想提交的情况，AJAX 提交的监听器不会执行
-
-    // "清空附件历史"清的是下面那张可见表格，成功后重新拉一次数据渲染，不用整页刷新。
-    ajaxSubmitForm(document.getElementById('clear-manifest-form'), (data) => {
-      if (data.ok) {
-        currentManifestPage = 1;
-        refreshManifest();
-      }
-    });
-
-    document.getElementById('clear-manifest-form').addEventListener('submit', (e) => {
-      if (!confirm('确定要清空附件历史吗？下面表格里显示的已保存附件记录会被永久删除，之前的下载链接也会跟着失效（不影响已经下载到你电脑上的文件）。这个操作不影响下次运行是否重新扫描邮件。')) {
-        e.stopImmediatePropagation();
-        e.preventDefault();
-      }
-    }, true);
 
     // ---- "AI 从附件里提取哪些字段"：一行一个字段，每行两个输入框——"字段名"（提取结果
     // 最终用的名字）和"备选名称"（可选，逗号分隔，按优先级从先到后；同一个意思在不同
@@ -623,6 +587,36 @@
         e.preventDefault();
       }
     }, true);
+
+    // ---- 筛选条件自动保存：改完任何一个输入框/下拉/勾选框（包括 AI 字段那几行动态
+    // 输入框），不用再手动点"保存配置"——停止编辑大概 800ms 后自动静默保存一次。用防抖
+    // 是因为不然打字的话每敲一下都会发一次保存请求，没必要。手动的"保存配置"按钮还留着，
+    // 想立刻保存、或者想触发上面那个"筛选条件全部留空"的确认提示，直接点它照样管用；
+    // 自动保存这条路径不弹那个确认框——静默保存本来就不该在你还在改的时候突然弹窗打断你。
+    const configFormForAutoSave = document.getElementById('config-form');
+    const autoSaveIndicator = document.getElementById('config-autosave-indicator');
+    let autoSaveTimer = null;
+    let autoSaveIndicatorFadeTimer = null;
+    function showAutoSaveIndicator(text, ok) {
+      if (!autoSaveIndicator) return;
+      autoSaveIndicator.textContent = text;
+      autoSaveIndicator.style.color = ok ? 'var(--color-text-faint, #888)' : '#b3261e';
+      autoSaveIndicator.style.opacity = '1';
+      clearTimeout(autoSaveIndicatorFadeTimer);
+      autoSaveIndicatorFadeTimer = setTimeout(() => { autoSaveIndicator.style.opacity = '0'; }, 2000);
+    }
+    function scheduleAutoSaveConfig() {
+      clearTimeout(autoSaveTimer);
+      autoSaveTimer = setTimeout(() => {
+        submitFormAsync(configFormForAutoSave)
+          .then(data => showAutoSaveIndicator(data.ok ? '已自动保存' : ('自动保存失败：' + data.message), data.ok))
+          .catch(() => showAutoSaveIndicator('自动保存失败（网络错误）', false));
+      }, 800);
+    }
+    // 'input' 覆盖文本框逐字输入和 AI 字段行的动态输入框；'change' 覆盖勾选框/下拉这种
+    // 一次性切换的控件（不用等 800ms，但走同一个防抖函数也没问题，反正就是快一点触发）。
+    configFormForAutoSave.addEventListener('input', scheduleAutoSaveConfig);
+    configFormForAutoSave.addEventListener('change', scheduleAutoSaveConfig);
   </script>
 </body>
 </html>

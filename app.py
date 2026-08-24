@@ -269,6 +269,19 @@ def _query_manifest_page(user_id, page):
     return rows, page, total_pages, total
 
 
+def _reset_processing_state(user_id):
+    """点"运行"/"仅导出标题"之前，把这个用户的去重记录（ProcessedMessage）和处理记录表格
+    （ManifestEntry）都清空——这样每次点运行都是从头全量扫描一遍符合筛选条件的邮件，不会
+    因为之前跑过而跳过、也不会让新旧几次运行的结果混在一张表里。
+    这是有代价的：附件会重新下载、PDF 会重新调用一次 AI 提取（重新产生这部分费用），
+    之前处理记录表格里累积的数据（包括还没导出成 Excel 的）也会被删掉，导出不了了——
+    这是特意要的效果，不是自动清空前需要额外确认的意外副作用，页面上已经不再放手动的
+    "清空处理记录"/"清空附件历史"按钮，运行本身就是唯一的入口。"""
+    ProcessedMessage.query.filter_by(user_id=user_id).delete()
+    ManifestEntry.query.filter_by(user_id=user_id).delete()
+    commit_with_retry(db.session)
+
+
 def register_routes(app):
     @app.route("/")
     def index():
@@ -485,11 +498,13 @@ def register_routes(app):
         if status and status.is_running:
             return _respond("已经有一个任务在运行了，请等它跑完。", ok=False)
 
+        _reset_processing_state(user.id)
+
         app = current_app_ref["app"]
         thread = threading.Thread(target=run_sync_for_user, args=(app, user.id), daemon=True)
         thread.start()
 
-        return _respond("已开始运行，下面的日志会自动刷新。")
+        return _respond("已清空之前的处理记录，开始全量重新扫描，下面的日志会自动刷新。")
 
     @app.route("/run_titles_only", methods=["POST"])
     def run_titles_only():
@@ -504,13 +519,15 @@ def register_routes(app):
         if status and status.is_running:
             return _respond("已经有一个任务在运行了，请等它跑完。", ok=False)
 
+        _reset_processing_state(user.id)
+
         app = current_app_ref["app"]
         thread = threading.Thread(
             target=run_sync_for_user, args=(app, user.id), kwargs={"download_attachments": False}, daemon=True
         )
         thread.start()
 
-        return _respond("已开始运行（仅导出标题模式，不下载附件），下面的日志会自动刷新。")
+        return _respond("已清空之前的处理记录，开始全量重新扫描（仅导出标题模式，不下载附件），下面的日志会自动刷新。")
 
     @app.route("/download_attachment/<int:entry_id>")
     def download_attachment(entry_id):

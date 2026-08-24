@@ -27,6 +27,7 @@ field_defs 是 field_config.parse_extract_fields(user.extract_fields) 解析出�
 import base64
 import json
 import os
+import re
 import threading
 
 import field_config
@@ -74,6 +75,43 @@ def _build_letter_values():
 
 
 _LETTER_VALUES = _build_letter_values()
+
+
+def _extract_json_payload(text):
+    """模型偶尔会在 JSON 前后多加几句话（哪怕 prompt 里明确要求"除了 JSON 数组不要输出任何
+    其他文字"），比如开头来一句"这是提取结果："，或者结尾补一句"如有疑问请告知"——文档越复杂、
+    要处理的字段/分组越多，模型"手痒"多说两句的概率越高。之前的写法要求 resp 整段文本本身就是
+    合法 JSON，只要多出这几个字就整条判定"解析失败"，本来提取对了的结果也白白报废、变成一整条
+    "无法识别"。改成：在整段文本里找第一个 JSON 数组/对象的起止边界（用括号计数，并跳过字符串
+    字面量内部的括号，避免字段值里本身带 [ ] 的文本把边界数错），只把这一段截出来解析，前后多余
+    的文字直接忽略；真的找不到成对的括号（很可能是被 max_tokens 截断，输出到一半就没了），原样
+    交还给调用方按解析失败处理，不在这里悄悄拼一个假的收尾骗过 json.loads。"""
+    for open_ch, close_ch in (("[", "]"), ("{", "}")):
+        start = text.find(open_ch)
+        if start == -1:
+            continue
+        depth = 0
+        in_string = False
+        escape = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if in_string:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+            elif ch == open_ch:
+                depth += 1
+            elif ch == close_ch:
+                depth -= 1
+                if depth == 0:
+                    return text[start : i + 1]
+    return text
 
 
 def _container_checksum_valid(number):
@@ -187,6 +225,13 @@ def extract_line_items_from_pdf(pdf_bytes, field_defs):
             f"重复出现了多少次），就是单 container，把所有费用加总成一条；出现两个或以上不同的值，才\n"
             f"按每个不同的值分组，各自把归属它的费用加总。不确定的话，宁可当成单 container（数组只有\n"
             f"一条），也不要在看不清楚具体是哪个 container 的情况下强行拆分。\n"
+            f"另外，用来分组的这个栏位，文档上实际印出来的内容不一定是干净的标准 container 号格式——\n"
+            f"可能是「container 号 + 其他编号」拼在一起（类似 TCNU5134944 CA00272401-2P 这种），也\n"
+            f"可能是完全不是 container 格式的其他类型编号（比如一串纯数字流水号）。不管这个值符不符合\n"
+            f"标准 container 号格式，只要账单表格里每一行这个栏位显示的内容不一样，就应该按各自不同\n"
+            f"的内容分成不同的组，把文档上实际印出来的内容原样填进「{container_field}」这个字段，不要\n"
+            f"因为它不像标准 container 号就丢弃、留空、或者把这一行错误地并到「其他费用」那一组——这\n"
+            f"一行既然有自己专属的引用号，就说明它是一笔有明确归属的独立费用，不是没有归属的杂项费用。\n"
         )
     else:
         grouping_instruction = "\n请把整份文档当成一组，只输出一个元素的数组。\n"
@@ -212,20 +257,30 @@ def extract_line_items_from_pdf(pdf_bytes, field_defs):
         f"小计、单价、税额搞混。\n"
         f"4. 币种类字段：填三位标准货币代码（如 USD/CAD/CNY），不要填货币符号或全称。\n"
         f"5. 日期类字段：统一按 YYYY-MM-DD 格式输出，不管文档里原始是什么格式。\n"
-        f"6. container(集装箱)号类字段：严格按文档上印刷的原样输出，通常是 4 个大写字母紧跟 7 位数字\n"
-        f"（比如 EMCU1234567），字母和数字中间不要加空格/横线，也不要把提单号、订单号等其他编号误当成它。\n"
+        f"6. container(集装箱)号类字段：如果文档里对应的是一个干净的标准 container 号，通常是 4 个\n"
+        f"大写字母紧跟 7 位数字（比如 EMCU1234567），按文档上印刷的原样输出，字母和数字中间不要加\n"
+        f"空格/横线；但如果这个字段在文档里实际对应的是一个更长、跟其他编号拼在一起的引用号（不是\n"
+        f"单纯的标准 container 号格式），或者根本是另一种不是 container 格式的编号，就把文档上实际\n"
+        f"印出来的完整内容原样填进去，不要因为不符合标准 container 格式就自行截断、丢弃，也不要编造\n"
+        f"一个看起来更规整的版本——照抄文档，不要按你以为的标准格式去纠正它；也不要把提单号、订单号\n"
+        f"这种文档里单独占一栏、明显是另一个独立字段的编号，跟这个字段混在一起。\n"
         f"7. 除了这个 JSON 数组，不要输出任何其他文字、不要加 ```json 代码块标记。"
     )
 
     error = None
     text = None
+    truncated = False
     try:
         b64 = base64.standard_b64encode(pdf_bytes).decode("utf-8")
         model = os.environ.get("ANTHROPIC_EXTRACT_MODEL", DEFAULT_MODEL)
         with _CONCURRENCY_GATE:
             resp = client.messages.create(
                 model=model,
-                max_tokens=4096,
+                # 一份账单如果涉及很多个 container，返回的 JSON 数组会跟着变长（每个 container
+                # 一整条记录），之前 4096 在 container 数量多、字段配得也多的情况下可能不够，
+                # 输出到一半被截断，剩下的字段全部丢失、JSON 也解析不出来——调高到 8192 留够
+                # 余量，多用的 token 只在真正需要时才会花，不是每次都按上限收费。
+                max_tokens=8192,
                 # 注意：claude-sonnet-5 等新模型已经不支持 temperature 参数了——只要请求里
                 # 带上这个字段（不管填几），就会直接报 400 "temperature is deprecated for
                 # this model"，所以这里改成不传，靠 prompt 本身（"照文档抄，不要发挥"）
@@ -250,6 +305,10 @@ def extract_line_items_from_pdf(pdf_bytes, field_defs):
         text = "".join(
             block.text for block in resp.content if getattr(block, "type", "") == "text"
         ).strip()
+        # 记下这次输出是不是被 max_tokens 截断的（"max_tokens" 而不是正常收尾的 "end_turn"）——
+        # 截断的话下面 JSON 解析大概率会失败，与其让人看着一句"JSON 解析失败"自己瞎猜原因，
+        # 不如直接把真正的原因（"输出被截断了，不是内容本身有问题"）摆出来。
+        truncated = getattr(resp, "stop_reason", None) == "max_tokens"
     except anthropic.APIStatusError as e:
         # API 明确拒绝了这次调用（Key 错、模型名不对、没余额、限流等），把它的原话带出去，
         # 比自己猜"哪里错了"靠谱得多。
@@ -275,7 +334,7 @@ def extract_line_items_from_pdf(pdf_bytes, field_defs):
                 text = text[4:]
             text = text.strip()
 
-        data = json.loads(text)
+        data = json.loads(_extract_json_payload(text))
         if isinstance(data, dict):
             # 模型没按数组格式返回（比如只有一个 container 时偷懒直接返回了单个对象），
             # 兼容一下当成只有一条的数组处理，不算错误——这种情况其实也不算少见。
@@ -299,11 +358,26 @@ def extract_line_items_from_pdf(pdf_bytes, field_defs):
             raise ValueError("数组里没有能用的 JSON 对象")
     except Exception as e:
         preview = (text or "")[:200]
+        if truncated:
+            return (
+                [dict(empty_item)],
+                f"模型输出在中途被截断了（没到 max_tokens 上限就该停的地方还没停，说明这份文档"
+                f"要提取的内容太多，8192 tokens 还是不够），不是内容本身有问题；如果经常遇到这种"
+                f"情况，可以考虑减少一次性配置的字段数量，或者联系我再调高 max_tokens。"
+                f"原始返回（截断预览）：{preview!r}",
+            )
         return [dict(empty_item)], f"模型返回的内容不是合法 JSON 数组，解析失败：{e}。原始返回（截断）：{preview!r}"
 
     # container 号这类字段格式很固定（ISO 6346 有校验位），能用算法客观核实的就顺手核实一下，
     # 不是为了拦截/覆盖 AI 给的答案（万一是算法本身的边界情况误判，不该让用户平白少一条数据），
     # 只是校验不通过时提醒一声，让人多留个心眼去核对原件，比什么提示都没有强。
+    # 注意：这个字段实际存的值不一定是干净的标准 container 号——可能是"container 号 + 其他编号"
+    # 拼在一起（比如"TCNU5134944 CA00272401-2P"），也可能根本就是完全不是 container 格式的
+    # 引用号（比如纯数字流水号）。校验位算法只对"标准 4 字母+7 位数字"这个格式有意义，所以这里
+    # 改成先在值里找有没有这样一段子串（哪怕跟别的编号拼在一起也能找出来），找到了才校验；完全
+    # 找不到这种格式的子串，就说明这行的值本来就不是走标准 container 编码的，直接跳过、不提示，
+    # 不然对这类供应商来说，每一行都会被判定"校验不通过"，全是噪音，反而看不出真正有问题的那条。
+    _CONTAINER_LIKE_RE = re.compile(r"(?<![A-Za-z0-9])[A-Za-z]{4}\d{7}(?!\d)")
     bad_values = []
     for item in items:
         for f in field_defs:
@@ -312,7 +386,8 @@ def extract_line_items_from_pdf(pdf_bytes, field_defs):
                 continue
             for v in [p.strip() for p in item[name].split(",") if p.strip()]:
                 compact = v.replace(" ", "").replace("-", "")
-                if not _container_checksum_valid(compact):
+                match = _CONTAINER_LIKE_RE.search(compact)
+                if match and not _container_checksum_valid(match.group(0)):
                     bad_values.append(f"{name}={v}")
     warn = None
     if bad_values:
