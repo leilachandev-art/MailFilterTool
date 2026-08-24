@@ -262,12 +262,18 @@ def _do_sync(app, user_id, run_id, download_attachments=True):
                             f"[提示] 这些字段配了备选名称，AI 会按优先级依次尝试匹配文档里实际出现的叫法："
                             f"{'、'.join(fields_with_aliases)}。",
                         )
-                    if any(field_config.field_looks_like_container(f) for f in configured_field_defs):
-                        log(
-                            app, user_id, run_id,
-                            "[提示] 检测到 container 相关字段：如果某份附件里同时涉及多个 container，"
-                            "会自动按 container 拆成多行分别记录金额，不会混在一起。",
-                        )
+                    # 注意：这条提示只是「顺手告诉你有 container 类字段」，不代表只有配了这种
+                    # 字段名的用户才会拆行——AI 现在会自己判断配置的字段里有没有哪个是「每笔
+                    # 业务各自独有的标识号」（不只是叫 container/集装箱的字段，Customer Ref./
+                    # Tracking #/BOL # 这些叫法一样认得出来），只要账单里这个字段的值真的对不上
+                    # 同一个值，就会按这个字段拆成多行，不需要字段名里必须出现 container 这个词。
+                    log(
+                        app, user_id, run_id,
+                        "[提示] 如果某份附件的账单里，能标识「是哪一笔业务」的那个字段（比如"
+                        "container 号、Customer Ref./参考号、Tracking #、提单号等，不限于字段名"
+                        "叫 container 的）出现了好几个不同的值，AI 会自动按这个字段拆成多行分别"
+                        "记录金额，不会混在一起；只有一笔业务的话正常输出一行。",
+                    )
 
         download_dir = os.path.join(DOWNLOADS_ROOT, str(user_id), run_id)
         if download_attachments:
