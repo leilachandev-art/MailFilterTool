@@ -32,6 +32,7 @@ from models import db, User, ManifestEntry, ProcessedMessage, RunLog, RunStatus
 import oauth_zoho as zoho_oauth
 import crypto_util as token_crypto
 import ai_extract
+import field_config
 from mail_sync import run_sync_for_user, DOWNLOADS_ROOT
 from db_utils import commit_with_retry
 
@@ -49,11 +50,6 @@ try:
     _OPENPYXL_AVAILABLE = True
 except ImportError:
     _OPENPYXL_AVAILABLE = False
-
-
-def _split_fields(text_value):
-    """把用户填的"发票号, 金额, 币种"这种逗号分隔的字段名拆成列表，去空白、去空项。"""
-    return [t.strip() for t in (text_value or "").split(",") if t.strip()]
 
 
 def _admin_emails():
@@ -376,7 +372,8 @@ def register_routes(app):
             page=page,
             total_pages=total_pages,
             total_entries=total_entries,
-            extract_field_names=_split_fields(user.extract_fields),
+            extract_field_names=field_config.field_names_only(user.extract_fields),
+            extract_field_defs=field_config.parse_extract_fields(user.extract_fields),
             ai_problem=ai_extract.diagnose(),
         )
 
@@ -420,7 +417,7 @@ def register_routes(app):
 
         page = request.args.get("page", 1, type=int) or 1
         rows, page, total_pages, total_entries = _query_manifest_page(user.id, page)
-        field_names = _split_fields(user.extract_fields)
+        field_names = field_config.field_names_only(user.extract_fields)
 
         entries_json = [
             {
@@ -464,7 +461,15 @@ def register_routes(app):
         user.search_since_date = request.form.get("search_since_date", "").strip()
         user.search_until_date = request.form.get("search_until_date", "").strip()
         user.search_require_attachment = bool(request.form.get("search_require_attachment"))
-        user.extract_fields = request.form.get("extract_fields", "")
+        # 前端把"AI 从附件里提取哪些字段"这个可增删列表提交上来的是一段 JSON
+        # （[{"name":..., "aliases":[...]}, ...]）——这里不直接原样存，而是先解析
+        # 再重新序列化一遍，一是顺手清洗掉空字段名/空备选名这些垃圾数据，二是万一
+        # 前端传上来的不是合法 JSON（比如浏览器插件搞坏了表单、或者是老版本页面缓存
+        # 没刷新），parse_extract_fields 会自动退化成按逗号拆分，不会直接存一段
+        # 解析不了的乱码进数据库、也不会让保存这个动作直接报错。
+        user.extract_fields = field_config.serialize_extract_fields(
+            field_config.parse_extract_fields(request.form.get("extract_fields", ""))
+        )
         user.ai_extract_enabled = bool(request.form.get("ai_extract_enabled"))
 
         commit_with_retry(db.session)
@@ -582,7 +587,7 @@ def register_routes(app):
             .order_by(ManifestEntry.created_at.desc(), ManifestEntry.id.desc())
             .all()
         )
-        field_names = _split_fields(user.extract_fields)
+        field_names = field_config.field_names_only(user.extract_fields)
 
         fixed_headers = ["发件人名", "发件人邮箱", "主题", "附件标题", "下载链接", "备注"]
         headers = fixed_headers + [f"{name}(AI提取)" for name in field_names]

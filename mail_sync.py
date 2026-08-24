@@ -23,6 +23,7 @@ import zoho_mail_api as zmail
 import zoho_search_api as zsearch
 import crypto_util as token_crypto
 import ai_extract
+import field_config
 from models import db, User, ProcessedMessage, ManifestEntry, RunLog, RunStatus
 from db_utils import commit_with_retry
 
@@ -234,9 +235,14 @@ def _do_sync(app, user_id, run_id, download_attachments=True):
         exclude_terms = _split(user.search_sender_excludes)
         # ai_extract_enabled 是独立于"填了哪些字段"的开关：关掉的话字段列表还留着（下次
         # 重新打开不用重新敲一遍），只是这次运行不会真的调用 AI，也就不会有对应费用。
-        configured_field_names = _split(user.extract_fields)
-        extract_field_names = configured_field_names if user.ai_extract_enabled else []
-        if download_attachments and configured_field_names:
+        # configured_field_defs 是 [{"name":..., "aliases":[...]}, ...] 这种结构化的字段
+        # 定义（见 field_config.py）——aliases 是这个字段在不同供应商账单里可能出现的
+        # 其他叫法，按优先级排，AI 提取时会依次尝试；只在界面上填了主名称、没填备选名称
+        # 的话 aliases 是空列表，效果跟老版本完全一样。
+        configured_field_defs = field_config.parse_extract_fields(user.extract_fields)
+        configured_field_names = [f["name"] for f in configured_field_defs]
+        extract_field_defs = configured_field_defs if user.ai_extract_enabled else []
+        if download_attachments and configured_field_defs:
             if not user.ai_extract_enabled:
                 log(
                     app, user_id, run_id,
@@ -249,7 +255,14 @@ def _do_sync(app, user_id, run_id, download_attachments=True):
                     log(app, user_id, run_id, f"[提示] AI 提取字段这个功能现在用不了：{ai_problem}")
                 else:
                     log(app, user_id, run_id, f"下载 PDF 附件时会用 AI 提取这些字段：{'、'.join(configured_field_names)}")
-                    if any(ai_extract._looks_like_container_field(n) for n in configured_field_names):
+                    fields_with_aliases = [f["name"] for f in configured_field_defs if f["aliases"]]
+                    if fields_with_aliases:
+                        log(
+                            app, user_id, run_id,
+                            f"[提示] 这些字段配了备选名称，AI 会按优先级依次尝试匹配文档里实际出现的叫法："
+                            f"{'、'.join(fields_with_aliases)}。",
+                        )
+                    if any(field_config.field_looks_like_container(f) for f in configured_field_defs):
                         log(
                             app, user_id, run_id,
                             "[提示] 检测到 container 相关字段：如果某份附件里同时涉及多个 container，"
@@ -426,9 +439,9 @@ def _do_sync(app, user_id, run_id, download_attachments=True):
                                     # extract_line_items_from_pdf 会带着具体原因回来，记进日志方便
                                     # 排查，不管提取成不成功都不影响附件本身已经下载成功这件事。
                                     items = [{}]
-                                    if filename.lower().endswith(".pdf") and extract_field_names:
+                                    if filename.lower().endswith(".pdf") and extract_field_defs:
                                         items, extract_error = ai_extract.extract_line_items_from_pdf(
-                                            content, extract_field_names
+                                            content, extract_field_defs
                                         )
                                         if extract_error:
                                             # extract_error 不一定是"失败"——也可能是提取成功了，但某个值没通过

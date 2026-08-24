@@ -10,12 +10,15 @@ Claude，把这些字段的值抠出来，不管发票排版长什么样，AI �
 需要在 .env 里配置 ANTHROPIC_API_KEY 才能用；没配置的话这个功能自动跳过
 （附件本身照常下载，只是提取字段那几列留空)。
 
-用法：extract_line_items_from_pdf(pdf_bytes, field_names) -> (items_list, error_message_or_None)
-一份 PDF 可能同时涉及好几个 container（或者除 container 费用外还有别的杂项费用），所以返回
-的是一个列表，每一条对应一个 container（或"其他费用"这一组）；最常见的单 container 场景，
-列表就只有一条，跟"一份 PDF 一组字段值"是一回事。调用方（mail_sync.py）应该把 error_message
-记到运行日志里——不然调用失败时用户只会看到"提取字段全是空的"，完全不知道是哪一步出的问题
-（没装包？Key 不对？模型名不对？配额用完？）。
+用法：extract_line_items_from_pdf(pdf_bytes, field_defs) -> (items_list, error_message_or_None)
+field_defs 是 field_config.parse_extract_fields(user.extract_fields) 解析出来的字段定义
+列表（每项 {"name":..., "aliases":[...]}），不是单纯的字段名字符串列表——aliases 是这个
+字段在不同供应商账单里可能出现的其他叫法，AI 会按优先级依次尝试匹配，具体见 field_config.py
+顶部的说明。一份 PDF 可能同时涉及好几个 container（或者除 container 费用外还有别的杂项
+费用），所以返回的是一个列表，每一条对应一个 container（或"其他费用"这一组）；最常见的
+单 container 场景，列表就只有一条，跟"一份 PDF 一组字段值"是一回事。调用方（mail_sync.py）
+应该把 error_message 记到运行日志里——不然调用失败时用户只会看到"提取字段全是空的"，完全
+不知道是哪一步出的问题（没装包？Key 不对？模型名不对？配额用完？）。
 
 用法：diagnose() -> str|None，返回"当前配置不满足什么条件"的说明，None 表示配置齐全，
 可以在运行前先检查一次，比每份 PDF 都失败一次才发现问题更快。
@@ -25,6 +28,8 @@ import base64
 import json
 import os
 import threading
+
+import field_config
 
 try:
     import anthropic
@@ -46,16 +51,13 @@ DEFAULT_MODEL = "claude-sonnet-5"
 _MAX_CONCURRENT = max(1, int(os.environ.get("AI_EXTRACT_MAX_CONCURRENT", "3") or "3"))
 _CONCURRENCY_GATE = threading.Semaphore(_MAX_CONCURRENT)
 
-# 字段名里带这些关键词的，认为它是"container(集装箱)号"这一类字段，提取出来以后会
-# 顺手用 ISO 6346 校验位算法核对一下格式对不对——不是为了拦截/丢弃 AI 给的答案
-# （万一算法本身有边界情况误判，不该让用户平白少一条数据），而是校验不通过时在日志里
-# 提醒一声，让人多留个心眼去核对原件，比什么提示都没有强。
-_CONTAINER_FIELD_KEYWORDS = ("container", "集装箱", "柜号", "箱号")
-
-
-def _looks_like_container_field(field_name):
-    lower = (field_name or "").lower()
-    return any(kw in lower for kw in _CONTAINER_FIELD_KEYWORDS)
+# 字段名（或者它的备选名称，见 field_config.py）里带这些关键词的，认为它是"container
+# (集装箱)号"这一类字段，提取出来以后会顺手用 ISO 6346 校验位算法核对一下格式对不对——
+# 不是为了拦截/丢弃 AI 给的答案（万一算法本身有边界情况误判，不该让用户平白少一条数据），
+# 而是校验不通过时在日志里提醒一声，让人多留个心眼去核对原件，比什么提示都没有强。
+# 关键词列表和判断逻辑统一放在 field_config.py（跟 app.py/mail_sync.py 共用同一份），
+# 这里直接复用，不要再自己维护一份，不然改一处忘了改另一处。
+_looks_like_container_field = field_config.field_looks_like_container
 
 
 def _build_letter_values():
@@ -116,22 +118,28 @@ def diagnose():
     return None
 
 
-def extract_line_items_from_pdf(pdf_bytes, field_names):
-    """field_names 是字段名列表，比如 ["发票号", "金额", "币种", "container号"]。
+def extract_line_items_from_pdf(pdf_bytes, field_defs):
+    """field_defs 是字段定义列表，每项 {"name": str, "aliases": [str, ...]}，一般用
+    field_config.parse_extract_fields(user.extract_fields) 解析出来。"name" 是这个字段
+    最终用来出结果的 key（处理记录表头/导出 Excel 列名/JSON key 都用它）；"aliases" 是
+    这个字段在不同供应商账单里可能出现的其他叫法，按优先级从先到后排——比如"金额"这个
+    字段，有的账单写"Total Amount"，有的写"Grand Total"，AI 会按这个优先级依次去文档里
+    找，找到其中任意一种叫法对应的值就用，不强求文档里非得出现"金额"这两个字。
     跟早期版本的区别：不再假设"一份 PDF 附件只对应一组字段值"——实际业务里，供应商发来的
     账单可能只涉及一个 container，也可能同时涉及好几个 container，还可能除了 container 相关
     费用外，另外还有一些不属于任何具体 container 的杂项费用（文件费、操作费之类）。
-    如果 field_names 里配了个"container 号"这一类字段（靠字段名关键词识别，不用用户特意配置
-    别的开关），会让 AI 按 container 分组，每个 container（以及"其他费用"这一组，如果有的话）
-    各自作为返回列表里单独的一条；没配 container 类字段、或者文档本身就只有一组的话，
-    返回列表就只有一条，跟旧版本单个 dict 的效果一样，调用方不用为"只有一个 container"这种
-    最常见的情况特殊处理。
+    如果 field_defs 里配了个"container 号"这一类字段（靠字段名/备选名关键词识别，不用用户
+    特意配置别的开关），会让 AI 按 container 分组，每个 container（以及"其他费用"这一组，
+    如果有的话）各自作为返回列表里单独的一条；没配 container 类字段、或者文档本身就只有
+    一组的话，返回列表就只有一条，跟旧版本单个 dict 的效果一样，调用方不用为"只有一个
+    container"这种最常见的情况特殊处理。
     返回 (items, error)：items 是 list[dict]，至少有一条（哪怕全是 None），每条 dict 的 key
-    跟传入的 field_names 完全一致，value 是字符串或 None；error 是 None（成功）或者一句话
-    错误描述（调用失败/解析失败/container 校验位不通过的提示），调用方应该把 error 记到运行
-    日志里，方便排查，而不是默默吞掉。"""
+    跟各 field_def 的 "name" 完全一致（不是 aliases），value 是字符串或 None；error 是
+    None（成功）或者一句话错误描述（调用失败/解析失败/container 校验位不通过的提示），
+    调用方应该把 error 记到运行日志里，方便排查，而不是默默吞掉。"""
+    field_names = [f["name"] for f in field_defs]
     empty_item = {name: None for name in field_names}
-    if not field_names:
+    if not field_defs:
         return [dict(empty_item)], None
 
     reason = diagnose()
@@ -142,8 +150,19 @@ def extract_line_items_from_pdf(pdf_bytes, field_names):
     if not client:
         return [dict(empty_item)], "无法创建 Anthropic 客户端（不应该发生，如果看到这条请检查 ANTHROPIC_API_KEY）。"
 
-    field_list_str = "、".join(field_names)
-    container_field = next((n for n in field_names if _looks_like_container_field(n)), None)
+    def _describe_field(f):
+        if f["aliases"]:
+            alias_str = "、".join(f["aliases"])
+            return (
+                f"- 「{f['name']}」：这个字段在不同账单里可能用不同的名称表示，按优先级从先到后依次尝试\n"
+                f"  匹配这些叫法：{alias_str}；只要在文档里找到其中任意一种叫法对应的值就用，不要求文档里\n"
+                f"  必须出现「{f['name']}」这几个字本身。最终结果的 JSON key 用「{f['name']}」这个主名称，\n"
+                f"  不要用备选名称当 key。"
+            )
+        return f"- 「{f['name']}」"
+
+    field_list_block = "\n".join(_describe_field(f) for f in field_defs)
+    container_field = next((f["name"] for f in field_defs if field_config.field_looks_like_container(f)), None)
 
     if container_field:
         grouping_instruction = (
@@ -158,18 +177,26 @@ def extract_line_items_from_pdf(pdf_bytes, field_names):
             f"  不要把别的 container 的金额也算进来、也不要重复计算；跟整份文档相关、不区分 container 的\n"
             f"  字段（比如发票号、开票日期、供应商名称这类文档级信息），每一条都填一样的值。\n"
             f"- 只有一个 container、且没有其他杂项费用的话，数组就只有一条，正常情况。\n"
+            f"补充线索（供参考，不是绝对规则，实际请以文档内容为准，不要死板套用）：这类物流账单常见\n"
+            f"两种版式——(a) 账单里有一个逐笔列出费用明细的表格（常见标题类似「Charges」），表格每一行\n"
+            f"通常带一个引用号列（常见标题类似「Customer Ref. #」「Customer Ref」「Ref #」），这个引用号\n"
+            f"往往就是这笔费用对应的 container 号，这种情况通常就是多 container 账单，应该按这个引用号\n"
+            f"分组；(b) 账单没有这种逐笔费用明细表，只有一个汇总性质的应付金额（常见标题类似「Amount\n"
+            f"Paid」「Amount Due」），这种情况通常是单 container 账单，只有一组。看到类似版式可以作为\n"
+            f"辅助判断，但最终还是要以文档里实际印出来的内容为准——账单格式不完全一样也不奇怪。\n"
         )
     else:
         grouping_instruction = "\n请把整份文档当成一组，只输出一个元素的数组。\n"
 
     prompt = (
-        f"这是一份物流/发票类 PDF 文档。请从中提取以下字段的值：{field_list_str}。\n"
+        f"这是一份物流/发票类 PDF 文档。请从中提取以下字段的值：\n"
+        f"{field_list_block}\n"
         f"在给出最终答案前，请先在心里把文档通读一遍、定位每个字段在文档里具体对应哪个数字/哪段文字，\n"
         f"再逐个核对一遍，确认没有认错行、认错列、张冠李戴，然后再输出最终结果。\n"
         f"{grouping_instruction}"
         f"要求：\n"
-        f"1. 返回一个 JSON 数组，数组每一项是一个 JSON 对象，对象的 key 必须跟我给的字段名完全一致，\n"
-        f"value 是提取到的值（字符串）。\n"
+        f"1. 返回一个 JSON 数组，数组每一项是一个 JSON 对象，对象的 key 必须是上面每个字段的主名称\n"
+        f"（「」里的那个词，不是备选名称，也不是文档里实际印的字样），value 是提取到的值（字符串）。\n"
         f"2. 如果某个字段在文档里确实找不到，或者你不确定，对应 value 填 null，不要瞎猜、不要编造、"
         f"不要因为「必须给个答案」就选一个不太确定的候选值——错误答案比留空更糟。\n"
         f"3. 金额类字段：只填数字本身（不要带货币符号、不要千分位逗号）；如果字段名没有明确指定是「小计/税金/定金」\n"
@@ -271,8 +298,9 @@ def extract_line_items_from_pdf(pdf_bytes, field_names):
     # 只是校验不通过时提醒一声，让人多留个心眼去核对原件，比什么提示都没有强。
     bad_values = []
     for item in items:
-        for name in field_names:
-            if not _looks_like_container_field(name) or not item.get(name):
+        for f in field_defs:
+            name = f["name"]
+            if not field_config.field_looks_like_container(f) or not item.get(name):
                 continue
             for v in [p.strip() for p in item[name].split(",") if p.strip()]:
                 compact = v.replace(" ", "").replace("-", "")
