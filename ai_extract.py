@@ -144,12 +144,35 @@ def is_configured():
     return bool(os.environ.get("ANTHROPIC_API_KEY", "")) and _ANTHROPIC_AVAILABLE
 
 
+def _check_anthropic_version():
+    """检查 anthropic 包版本是否存在已知的 Pydantic v2 兼容问题。
+    返回警告字符串，或 None（版本没问题/检查失败不影响）。"""
+    try:
+        import importlib.metadata
+        ver = importlib.metadata.version("anthropic")
+        parts = ver.split(".")
+        major, minor = int(parts[0]), int(parts[1])
+        # 0.x.y 系列：0.40 以前存在 'typing.Union' __discriminator__ 兼容问题
+        if major == 0 and minor < 40:
+            return (
+                f"anthropic 包版本 {ver} 过旧，与当前 Pydantic 版本不兼容（建议 0.40+），"
+                f"会导致几乎所有 PDF 提取失败。请执行：pip install --upgrade anthropic，"
+                f"然后重启 python app.py。"
+            )
+    except Exception:
+        pass  # 拿不到版本号就跳过，不阻断
+    return None
+
+
 def diagnose():
     """检查当前环境能不能跑 AI 提取，能跑返回 None，不能跑返回具体原因（中文，可直接展示/记日志）。
     常见的两个坑：requirements.txt 更新后没有重新 pip install，或者 .env 改了但没重启进程
     （load_dotenv 只在启动时读一次，改完 .env 必须重新跑 python app.py 才会生效）。"""
     if not _ANTHROPIC_AVAILABLE:
         return "没装 anthropic 这个 Python 包。请在项目的虚拟环境里执行：pip install -r requirements.txt（或者单独 pip install anthropic），然后重新启动 python app.py。"
+    ver_warning = _check_anthropic_version()
+    if ver_warning:
+        return ver_warning
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         return "环境变量 ANTHROPIC_API_KEY 是空的。确认 .env 里确实填了这一行，并且改完 .env 之后重新启动了 python app.py（改配置文件不会自动生效，必须重启进程）。"
@@ -338,6 +361,17 @@ def extract_line_items_from_pdf(pdf_bytes, field_defs):
         except Exception:
             detail = str(e)
         error = f"Anthropic API 返回错误（状态码 {e.status_code}）：{detail or e}"
+    except AttributeError as e:
+        # Pydantic v2 与旧版 anthropic SDK 的已知兼容问题：SDK 内部用 typing.Union
+        # 当鉴别字段（discriminator），但 Pydantic v2 的新接口不再支持这种写法，
+        # 导致在序列化请求参数时抛出 AttributeError。升级 anthropic 包可以修复。
+        if "__discriminator__" in str(e) or ("Union" in str(e) and "__dict__" in str(e)):
+            error = (
+                f"Anthropic SDK 与当前 Pydantic 版本不兼容，请在项目目录执行："
+                f"pip install --upgrade anthropic，然后重启 python app.py（原始错误：{e}）"
+            )
+        else:
+            error = f"调用 Anthropic API 失败：{type(e).__name__}: {e}"
     except Exception as e:
         error = f"调用 Anthropic API 失败：{type(e).__name__}: {e}"
 

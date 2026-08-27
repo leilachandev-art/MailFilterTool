@@ -7,6 +7,12 @@ cryptography==42.0.8
 gunicorn==22.0.0
 openpyxl==3.1.5
 anthropic==0.40.0
+# anthropic 依赖 pydantic，但只约束了一个很宽的版本范围（v1/v2 都满足），不会主动帮你
+# 把已经装好的旧版 pydantic v1 升级掉。本地环境如果之前装过别的东西、留下了 pydantic v1，
+# 新版 anthropic 的类型注解在 v1 下解析不出来，会报
+# "pydantic.errors.ConfigError: unable to infer type for attribute" 这种错——显式钉住
+# v2，装的时候直接拿到兼容版本，不用等报错了才发现。
+pydantic>=2,<3
 
 # 连 PostgreSQL 需要这个库（部署到 Render 用 Postgres 时会用到）。装了它但本地用
 # SQLite 测试完全没影响，不用单独装/卸载，所以直接放进 requirements.txt，部署时

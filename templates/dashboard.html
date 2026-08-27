@@ -41,7 +41,6 @@
 
     <div class="card">
       <h2>筛选条件</h2>
-      <p class="hint" style="margin-top:0;">跟你在网页邮箱搜索框里用的是同一套 Zoho 搜索语法——主题/附件名/发件人这几项会直接交给 Zoho 在服务端搜；"发件人排除"是 Zoho 语法不支持的反向条件，由这个网站自己在拿到结果后再过滤一遍。多个值用逗号分隔，同一项内满足任意一个即可。</p>
       <form method="post" action="{{ url_for('save_config') }}" id="config-form">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 
@@ -52,7 +51,8 @@
         <input type="text" name="search_attachment_contains" value="{{ user.search_attachment_contains }}" placeholder="invoice, statement">
 
         <label>发件人包含</label>
-        <input type="text" name="search_sender_contains" value="{{ user.search_sender_contains }}" placeholder="vendor.com 或 ap@vendor.com">
+        <input type="text" name="search_sender_contains" id="search_sender_contains" value="{{ user.search_sender_contains }}" placeholder="vendor.com 或 ap@vendor.com">
+        <p class="hint" id="vendor-preset-match-hint" style="display:none; margin-top:4px;"></p>
 
         <label>正文包含</label>
         <input type="text" name="search_content_contains" value="{{ user.search_content_contains }}" placeholder="invoice, 发票">
@@ -66,28 +66,43 @@
             <input type="text" name="search_since_date" value="{{ user.search_since_date }}" placeholder="YYYY-MM-DD" style="width:160px;">
           </div>
           <div>
-            <label title="可选，范围的结束日期（含当天）。不填的话运行时自动按当天算，不用每次手动填今天的日期。">扫描到此日期为止（可选）</label>
-            <input type="text" name="search_until_date" value="{{ user.search_until_date }}" placeholder="不填=今天" style="width:160px;" title="可选，范围的结束日期（含当天）。不填的话运行时自动按当天算，不用每次手动填今天的日期。">
+            <label>截止日期（可选）</label>
+            <input type="text" name="search_until_date" value="{{ user.search_until_date }}" placeholder="不填=今天" style="width:160px;" title="不填时自动按今天算">
           </div>
         </div>
 
         <div class="checkbox-row" style="margin-top:14px;">
           <input type="checkbox" id="search_require_attachment" name="search_require_attachment" {% if user.search_require_attachment %}checked{% endif %}>
-          <label for="search_require_attachment" style="margin:0;">只看带附件的邮件（不勾选的话，没附件的邮件也会记录标题，方便批量导出）</label>
+          <label for="search_require_attachment" style="margin:0;">只看带附件的邮件</label>
         </div>
 
         <div class="checkbox-row" style="margin-top:14px;">
           <input type="checkbox" id="ai_extract_enabled" name="ai_extract_enabled" {% if user.ai_extract_enabled %}checked{% endif %}>
-          <label for="ai_extract_enabled" style="margin:0;">启用 AI 从附件里提取字段（关掉的话，下面配置的字段名还会保留，只是运行时不会真的调用 AI，也就不会产生这部分费用）</label>
+          <label for="ai_extract_enabled" style="margin:0;">启用 AI 提取字段</label>
         </div>
 
         <div id="extract-fields-section" style="display:{{ 'block' if user.ai_extract_enabled else 'none' }};">
-          <label title="下载 PDF 附件时会调用 AI 按这几个字段名去读文档内容提取，不是关键词/表格匹配，排版差异大的发票也能读懂；拿不准的值会留空，不瞎猜。">AI 从附件里提取哪些字段</label>
+          {% if is_admin %}
+          <div style="margin-bottom:18px;">
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:6px;">
+              <label style="margin:0;">按发件人配置专属字段</label>
+              <button type="button" class="btn btn-secondary" id="add-vendor-preset-btn" style="padding:4px 12px; font-size:12px;">+ 添加预设</button>
+            </div>
+            <p class="hint" style="margin:0 0 8px;">命中预设时用预设字段，否则用默认字段。支持域名（如 ascendtms.com）或完整邮箱，精确邮箱优先。自动保存，对所有用户生效。</p>
+            <div id="vendor-presets-list"></div>
+          </div>
+          <div id="default-fields-section" style="border-top:1px solid #e5e7eb; padding-top:14px;">
+          {% endif %}
+
+          <label>{% if is_admin %}默认字段（无匹配预设时使用）{% else %}AI 从附件里提取哪些字段{% endif %}</label>
           <div id="extract-fields-list"></div>
           <button type="button" class="btn btn-secondary" id="add-extract-field-btn" style="padding:6px 14px; font-size:12px;">+ 添加字段</button>
-          <p class="hint" style="margin-top:8px;">"字段名"是提取结果最终显示/导出用的名字，比如"发票总金额""币种""container号"。"备选名称"可以不填；不同供应商账单里同一个意思可能叫法不一样（比如金额字段，有的账单写 Total Amount，有的写 Grand Total），填了的话 AI 会按你填的顺序依次去文档里找，逗号分隔多个，从左到右就是优先级从高到低，找到第一个匹配的叫法就用那个值。</p>
           {% if ai_problem %}
           <p class="hint" style="color:#b3261e;">⚠ 暂时用不了：{{ ai_problem }}</p>
+          {% endif %}
+
+          {% if is_admin %}
+          </div>
           {% endif %}
         </div>
         <input type="hidden" name="extract_fields" id="extract-fields-hidden">
@@ -109,8 +124,8 @@
       </form>
       <form method="post" action="{{ url_for('run_titles_only') }}" id="run-titles-form" style="display:inline; margin-left:8px;">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-        <button class="btn btn-secondary" type="submit" id="run-titles-btn" {% if status and status.is_running %}disabled{% endif %} title="只搜索、不下载附件，命中几百封邮件也是秒级完成，适合只想批量拿邮件标题的场景">
-          {% if status and status.is_running %}运行中...{% else %}仅导出标题（不下载附件，更快）{% endif %}
+        <button class="btn btn-secondary" type="submit" id="run-titles-btn" {% if status and status.is_running %}disabled{% endif %} title="只搜索、不下载附件，速度更快">
+          {% if status and status.is_running %}运行中...{% else %}仅导出标题{% endif %}
         </button>
       </form>
       <form method="post" action="{{ url_for('stop_run') }}" id="stop-form" style="display:inline; margin-left:8px;">
@@ -119,7 +134,7 @@
           停止运行
         </button>
       </form>
-      <p class="hint">点"运行"会自动清空之前的处理记录和附件历史，重新全量扫描一遍符合筛选条件的邮件（已经下载过的附件也会重新下载、PDF 会重新调用一次 AI 提取），不是增量扫描，请留意这会重新产生 AI 调用费用；如果之前累积的处理记录还没导出 Excel，建议运行前先导出。</p>
+      <p class="hint">运行会清空历史记录重新全量扫描，未导出的记录请先导出。</p>
 
       {% if is_admin %}
       <div id="progress-line" style="display:none; margin-top:14px; font-size:13px; color:#333;">
@@ -157,7 +172,6 @@
       <div id="manifest-body" style="margin-top:16px;">
       <div style="margin-bottom:12px;">
         <a class="btn btn-secondary" href="{{ url_for('export_excel') }}">导出 Excel</a>
-        <span class="hint" style="display:inline; margin-left:6px;">导出的下载链接需要登录同一个网站才能打开，服务器临时文件 3 天后会被清理，建议尽快下载，不要当长期归档用。AI 提取的那几列拿不准会留空，仅供参考，重要数字建议核对原附件。</span>
       </div>
       <table>
         <thead>
@@ -215,6 +229,13 @@
   </div>
 
   <script>
+    // 按发件人配置的字段预设那几个 AJAX 请求不是走真正的 <form> 提交（没有现成的
+    // csrf_token 隐藏输入框可以借用 FormData(form) 自动带上），手动拼 FormData 时
+    // 用这个全局变量把 CSRF token 塞进去。
+    const CSRF_TOKEN = "{{ csrf_token() }}";
+    // 普通用户/预览成员视角：各预设的 pattern → field_names 映射，供动态切换表格列用。
+    const VENDOR_PRESET_FIELD_NAMES = {{ vendor_preset_field_names | tojson }};
+
     // ---- 小 toast 提示，代替整页刷新后在顶部展示的 flash 消息 ----
     let toastTimer = null;
     function showToast(message, ok = true) {
@@ -338,8 +359,17 @@
       }
     }
 
-    function refreshManifest() {
-      fetch("{{ url_for('manifest_page') }}?page=" + currentManifestPage)
+    function refreshManifest(sender) {
+      let url = "{{ url_for('manifest_page') }}?page=" + currentManifestPage;
+      {% if previewing_member %}
+      url += "&view=member";
+      {% endif %}
+      {% if not is_admin %}
+      // 普通用户：把当前"发件人包含"输入框的值带过去，让后端按预设挑对应字段列
+      const senderVal = (sender !== undefined) ? sender : (document.getElementById('search_sender_contains').value.trim());
+      url += "&sender=" + encodeURIComponent(senderVal);
+      {% endif %}
+      fetch(url)
         .then(r => r.json())
         .then(data => { if (!data.error) renderManifest(data); })
         .catch(() => {});
@@ -359,13 +389,40 @@
           if (progressSaved) progressSaved.textContent = data.saved || 0;
           if (progressLine) progressLine.style.display = data.is_running ? 'block' : 'none';
 
+          // 管理员：运行中出现错误时在进度行旁边追加一个醒目的警示标签。
+          const adminErrorBadge = document.getElementById('admin-error-badge');
+          if (progressLine && data.is_running) {
+            const ec = data.error_count || 0;
+            if (ec > 0) {
+              if (adminErrorBadge) {
+                adminErrorBadge.textContent = `⚠ 已出现 ${ec} 个错误，见日志`;
+              } else {
+                const badge = document.createElement('span');
+                badge.id = 'admin-error-badge';
+                badge.style.cssText = 'margin-left:12px; color:#b45309; font-weight:600; font-size:13px;';
+                badge.textContent = `⚠ 已出现 ${ec} 个错误，见日志`;
+                progressLine.appendChild(badge);
+              }
+            } else if (adminErrorBadge) {
+              adminErrorBadge.textContent = '';
+            }
+          } else if (adminErrorBadge && !data.is_running) {
+            adminErrorBadge.textContent = '';
+          }
+
           // 非管理员看的简化状态：一个小圆点 + 一句话状态，加一条"已检查 X / 共 Y 封"的进度条。
           if (simpleStatusText) {
             const checked = data.checked || 0;
             const total = data.total || 0;
             if (data.is_running) {
-              simpleStatusDot.style.background = '#2563eb';
-              simpleStatusText.textContent = '运行中...';
+              const ec = data.error_count || 0;
+              if (ec > 0) {
+                simpleStatusDot.style.background = '#d97706';
+                simpleStatusText.textContent = `运行中（已出现 ${ec} 个错误，附件仍在下载，完成后请联系管理员查看日志）`;
+              } else {
+                simpleStatusDot.style.background = '#2563eb';
+                simpleStatusText.textContent = '运行中...';
+              }
             } else if (data.last_run_ok === false) {
               simpleStatusDot.style.background = '#b91c1c';
               simpleStatusText.textContent = '上次运行出错了，可以重新运行一次，仍有问题请联系管理员';
@@ -499,68 +556,460 @@
     // Grand Total，AI 会按这个顺序依次去文档里找）。提交时把每一行拼成
     // {"name":..., "aliases":[...]} 这样的对象，整体存成 JSON 数组塞进隐藏的
     // extract_fields 字段里，后端 field_config.py 负责解析（也兼容老版本纯逗号
-    // 分隔字符串，不用担心老账号的配置丢失）。 ----
+    // 分隔字符串，不用担心老账号的配置丢失）。
+    // 这套"一行一个字段"的编辑逻辑，全局默认字段列表和下面每一条按发件人配的专属预设
+    // 都要用到，所以抽成一个工厂函数 makeFieldListEditor，传进去一个容器 + 每次改动
+    // 后的回调，各自维护各自的行，互不影响。----
+    function makeFieldListEditor(listEl, onChange) {
+      function getDefs() {
+        return Array.from(listEl.querySelectorAll('.extract-field-row'))
+          .map(row => {
+            const name = row.querySelector('.extract-field-name').value.trim();
+            const aliasesRaw = row.querySelector('.extract-field-aliases').value;
+            const aliases = aliasesRaw.split(',').map(a => a.trim()).filter(a => a);
+            return { name, aliases };
+          })
+          .filter(f => f.name);
+      }
+
+      function addRow(fieldDef) {
+        fieldDef = fieldDef || { name: '', aliases: [] };
+        const row = document.createElement('div');
+        row.className = 'extract-field-row';
+
+        const nameInput = document.createElement('input');
+        nameInput.type = 'text';
+        nameInput.className = 'extract-field-name';
+        nameInput.placeholder = '字段名，比如：发票总金额';
+        nameInput.value = fieldDef.name || '';
+        nameInput.style.flex = '0 0 180px';
+        nameInput.addEventListener('input', onChange);
+
+        const aliasesInput = document.createElement('input');
+        aliasesInput.type = 'text';
+        aliasesInput.className = 'extract-field-aliases';
+        aliasesInput.placeholder = '备选名称，可选，逗号分隔，按优先级从先到后：Total Amount, Grand Total';
+        aliasesInput.value = (fieldDef.aliases || []).join(', ');
+        aliasesInput.addEventListener('input', onChange);
+
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.className = 'btn btn-secondary btn-remove';
+        removeBtn.textContent = '删除';
+        removeBtn.addEventListener('click', () => {
+          row.remove();
+          // 删空了的话补一行空的回来，不然用户没地方点了、没法再输入新字段。
+          if (!listEl.children.length) addRow();
+          onChange();
+        });
+
+        row.appendChild(nameInput);
+        row.appendChild(aliasesInput);
+        row.appendChild(removeBtn);
+        listEl.appendChild(row);
+        return row;
+      }
+
+      return { addRow, getDefs };
+    }
+
     const extractFieldsList = document.getElementById('extract-fields-list');
     const extractFieldsHidden = document.getElementById('extract-fields-hidden');
     const addExtractFieldBtn = document.getElementById('add-extract-field-btn');
     const initialExtractFields = {{ extract_field_defs | tojson }};
 
-    function syncExtractFieldsHidden() {
-      const defs = Array.from(extractFieldsList.querySelectorAll('.extract-field-row'))
-        .map(row => {
-          const name = row.querySelector('.extract-field-name').value.trim();
-          const aliasesRaw = row.querySelector('.extract-field-aliases').value;
-          const aliases = aliasesRaw.split(',').map(a => a.trim()).filter(a => a);
-          return { name, aliases };
-        })
-        .filter(f => f.name);
-      extractFieldsHidden.value = JSON.stringify(defs);
-    }
-
-    function addExtractFieldRow(fieldDef) {
-      fieldDef = fieldDef || { name: '', aliases: [] };
-      const row = document.createElement('div');
-      row.className = 'extract-field-row';
-
-      const nameInput = document.createElement('input');
-      nameInput.type = 'text';
-      nameInput.className = 'extract-field-name';
-      nameInput.placeholder = '字段名，比如：发票总金额';
-      nameInput.value = fieldDef.name || '';
-      nameInput.style.flex = '0 0 180px';
-      nameInput.addEventListener('input', syncExtractFieldsHidden);
-
-      const aliasesInput = document.createElement('input');
-      aliasesInput.type = 'text';
-      aliasesInput.className = 'extract-field-aliases';
-      aliasesInput.placeholder = '备选名称，可选，逗号分隔，按优先级从先到后：Total Amount, Grand Total';
-      aliasesInput.value = (fieldDef.aliases || []).join(', ');
-      aliasesInput.addEventListener('input', syncExtractFieldsHidden);
-
-      const removeBtn = document.createElement('button');
-      removeBtn.type = 'button';
-      removeBtn.className = 'btn btn-secondary btn-remove';
-      removeBtn.textContent = '删除';
-      removeBtn.addEventListener('click', () => {
-        row.remove();
-        // 删空了的话补一行空的回来，不然用户没地方点了、没法再输入新字段。
-        if (!extractFieldsList.children.length) addExtractFieldRow();
-        syncExtractFieldsHidden();
-      });
-
-      row.appendChild(nameInput);
-      row.appendChild(aliasesInput);
-      row.appendChild(removeBtn);
-      extractFieldsList.appendChild(row);
-    }
-
-    (initialExtractFields.length ? initialExtractFields : [{ name: '', aliases: [] }]).forEach(addExtractFieldRow);
-    syncExtractFieldsHidden();
+    const globalFieldEditor = makeFieldListEditor(extractFieldsList, () => {
+      extractFieldsHidden.value = JSON.stringify(globalFieldEditor.getDefs());
+    });
+    (initialExtractFields.length ? initialExtractFields : [{ name: '', aliases: [] }]).forEach(globalFieldEditor.addRow);
+    extractFieldsHidden.value = JSON.stringify(globalFieldEditor.getDefs());
 
     addExtractFieldBtn.addEventListener('click', () => {
-      addExtractFieldRow();
-      extractFieldsList.lastElementChild.querySelector('.extract-field-name').focus();
+      const row = globalFieldEditor.addRow();
+      row.querySelector('.extract-field-name').focus();
+      extractFieldsHidden.value = JSON.stringify(globalFieldEditor.getDefs());
     });
+
+    {% if is_admin %}
+    // ---- 按发件人配置的专属字段预设（管理员专用，全站共享）：每条预设是"匹配邮箱/域名"
+    // + 一份跟上面一模一样的字段列表编辑器。这些不属于 #config-form（预设有自己独立的
+    // 后端路由，不跟着"保存配置"一起提交），每条预设自己就是一个独立的小卡片，改动之后
+    // 自己防抖自动保存，不用整页的保存按钮。普通用户看不到这张卡片对应的 HTML（后端
+    // is_admin 为 false 时整块没渲染），这段 JS 也只在管理员视角下才会跑。 ----
+    const vendorPresetsList = document.getElementById('vendor-presets-list');
+    const addVendorPresetBtn = document.getElementById('add-vendor-preset-btn');
+    const initialVendorPresets = {{ vendor_presets | tojson }};
+
+    function vendorPresetFormData(patternValue, fieldDefs) {
+      const fd = new FormData();
+      fd.append('csrf_token', CSRF_TOKEN);
+      fd.append('match_pattern', patternValue);
+      fd.append('extract_fields', JSON.stringify(fieldDefs));
+      return fd;
+    }
+
+    // 新增预设时，输一个发件人邮箱/域名，先看看"预设池"（已经真正保存过的那些卡片，
+    // 没保存过的空白卡片不算）里是不是已经有一条覆盖得到这个发件人了——跟后端
+    // field_config.pick_field_defs_for_sender() 同一套优先级：
+    // - 填的是完整邮箱：已存在同一个精确邮箱的预设，或者已存在覆盖它所在域名的预设，
+    //   都算"已经覆盖"（域名预设本来就是为了兜住这个域名下所有没单独配过的地址）；
+    // - 填的是纯域名：只有已存在同一个域名的预设才算"已经覆盖"（不会因为这个域名下
+    //   某个具体地址单独配过预设，就认为整个域名也配过——域名预设是用来兜住其他地址的，
+    //   这种情况仍然需要新建）。
+    function findMatchingSavedPreset(candidate, excludeCard) {
+      const value = (candidate || '').trim().toLowerCase();
+      if (!value) return null;
+      const isEmail = value.includes('@');
+      const domain = isEmail ? value.split('@').pop() : value;
+
+      const savedCards = Array.from(vendorPresetsList.querySelectorAll('.vendor-preset-card'))
+        .filter(c => c !== excludeCard && c.dataset.presetId);
+
+      let exactMatch = null;
+      let domainMatch = null;
+      savedCards.forEach(c => {
+        const pattern = c.querySelector('.vendor-preset-pattern').value.trim().toLowerCase();
+        if (!pattern) return;
+        if (pattern.includes('@')) {
+          if (!exactMatch && isEmail && pattern === value) exactMatch = c;
+        } else {
+          const pd = pattern.replace(/^@/, '');
+          if (!domainMatch && pd === domain) domainMatch = c;
+        }
+      });
+      return exactMatch || domainMatch;
+    }
+
+    function buildVendorPresetCard(preset) {
+      // preset: {id, match_pattern, field_defs}；id 为 null 表示还没保存过的新卡片。
+      const card = document.createElement('div');
+      card.className = 'vendor-preset-card';
+      card.style.cssText = 'margin-top:8px; border:1px solid #e5e7eb; border-radius:8px; overflow:hidden;';
+      card.dataset.presetId = preset.id == null ? '' : String(preset.id);
+
+      const isNew = preset.id == null;
+      let isExpanded = isNew; // 新卡片默认展开，已保存的默认折叠
+
+      // ---- 折叠态头部（始终可见，点击切换展开/折叠）----
+      const collapsedHeader = document.createElement('div');
+      collapsedHeader.style.cssText = 'display:flex; align-items:center; gap:8px; padding:9px 12px; cursor:pointer; user-select:none; background:#fafafa;';
+
+      const chevron = document.createElement('span');
+      chevron.style.cssText = 'font-size:10px; color:#888; flex-shrink:0; transition:transform .15s; display:inline-block;';
+      chevron.textContent = '▶';
+
+      const patternLabel = document.createElement('span');
+      patternLabel.style.cssText = 'flex:1; font-size:13px; font-weight:500; color:#333; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;';
+      patternLabel.textContent = preset.match_pattern || '新预设（未保存）';
+
+      const fieldCountLabel = document.createElement('span');
+      fieldCountLabel.style.cssText = 'font-size:12px; color:#888; flex-shrink:0; margin-right:4px;';
+      const initialFieldCount = (preset.field_defs || []).filter(f => f.name).length;
+      fieldCountLabel.textContent = initialFieldCount ? `${initialFieldCount} 个字段` : '';
+
+      const quickDeleteBtn = document.createElement('button');
+      quickDeleteBtn.type = 'button';
+      quickDeleteBtn.className = 'btn btn-secondary btn-remove';
+      quickDeleteBtn.style.cssText = 'padding:3px 10px; font-size:11px; flex-shrink:0;';
+      quickDeleteBtn.textContent = '删除';
+
+      collapsedHeader.appendChild(chevron);
+      collapsedHeader.appendChild(patternLabel);
+      collapsedHeader.appendChild(fieldCountLabel);
+      collapsedHeader.appendChild(quickDeleteBtn);
+
+      // ---- 展开态内容 ----
+      const expandedBody = document.createElement('div');
+      expandedBody.style.cssText = 'padding:12px; border-top:1px solid #e5e7eb;';
+
+      const headerRow = document.createElement('div');
+      headerRow.style.cssText = 'display:flex; gap:8px; align-items:center;';
+
+      const patternInput = document.createElement('input');
+      patternInput.type = 'text';
+      patternInput.className = 'vendor-preset-pattern';
+      patternInput.placeholder = '发件人邮箱或域名，比如 info@freightcom.com 或 ascendtms.com';
+      patternInput.value = preset.match_pattern || '';
+      patternInput.style.flex = '1';
+
+      const saveBtn = document.createElement('button');
+      saveBtn.type = 'button';
+      saveBtn.className = 'btn';
+      saveBtn.style.cssText = 'padding:6px 14px; font-size:12px;';
+      saveBtn.textContent = '保存';
+
+      const deleteBtn = document.createElement('button');
+      deleteBtn.type = 'button';
+      deleteBtn.className = 'btn btn-secondary btn-remove';
+      deleteBtn.textContent = '删除预设';
+
+      const saveIndicator = document.createElement('span');
+      saveIndicator.style.cssText = 'font-size:12px; color:var(--color-text-faint, #888); opacity:0; transition:opacity .4s; white-space:nowrap;';
+
+      headerRow.appendChild(patternInput);
+      headerRow.appendChild(saveBtn);
+      headerRow.appendChild(deleteBtn);
+      headerRow.appendChild(saveIndicator);
+
+      const matchNoticeEl = document.createElement('p');
+      matchNoticeEl.className = 'hint';
+      matchNoticeEl.style.cssText = 'display:none; margin-top:8px; color:#1d4ed8;';
+
+      const fieldsList = document.createElement('div');
+      fieldsList.style.marginTop = '10px';
+
+      const addFieldBtn = document.createElement('button');
+      addFieldBtn.type = 'button';
+      addFieldBtn.className = 'btn btn-secondary';
+      addFieldBtn.style.cssText = 'padding:4px 10px; font-size:11px; margin-top:6px;';
+      addFieldBtn.textContent = '+ 添加字段';
+
+      expandedBody.appendChild(headerRow);
+      expandedBody.appendChild(matchNoticeEl);
+      expandedBody.appendChild(fieldsList);
+      expandedBody.appendChild(addFieldBtn);
+
+      card.appendChild(collapsedHeader);
+      card.appendChild(expandedBody);
+      vendorPresetsList.appendChild(card);
+
+      // ---- 折叠/展开 ----
+      function setExpanded(expand) {
+        isExpanded = expand;
+        expandedBody.style.display = expand ? 'block' : 'none';
+        chevron.style.transform = expand ? 'rotate(90deg)' : '';
+        collapsedHeader.style.background = expand ? '#fff' : '#fafafa';
+      }
+      setExpanded(isExpanded);
+
+      collapsedHeader.addEventListener('click', (e) => {
+        if (quickDeleteBtn.contains(e.target)) return;
+        setExpanded(!isExpanded);
+      });
+
+      // 同步折叠态显示的发件人和字段数
+      function updateCollapsedLabels() {
+        patternLabel.textContent = patternInput.value.trim() || '新预设（未保存）';
+        const count = editor.getDefs().filter(f => f.name).length;
+        fieldCountLabel.textContent = count ? `${count} 个字段` : '';
+      }
+
+      function showSaved(text, ok) {
+        saveIndicator.textContent = text;
+        saveIndicator.style.color = ok ? 'var(--color-text-faint, #888)' : '#b3261e';
+        saveIndicator.style.opacity = '1';
+        clearTimeout(saveIndicator._fadeTimer);
+        saveIndicator._fadeTimer = setTimeout(() => { saveIndicator.style.opacity = '0'; }, 2000);
+      }
+
+      let matchedExistingCard = null;
+
+      function doSave() {
+        const patternValue = patternInput.value.trim();
+        if (!patternValue) {
+          showSaved('请先填发件人邮箱或域名', false);
+          return Promise.resolve();
+        }
+        if (matchedExistingCard) {
+          showSaved('这个发件人已经被上面高亮的那条预设覆盖了，不用重复保存。', false);
+          return Promise.resolve();
+        }
+        const fieldDefs = editor.getDefs();
+        const presetId = card.dataset.presetId;
+        const url = presetId ? `/vendor-presets/${presetId}` : '/vendor-presets';
+        return fetch(url, {
+          method: 'POST',
+          headers: { 'X-Requested-With': 'XMLHttpRequest' },
+          body: vendorPresetFormData(patternValue, fieldDefs),
+        })
+          .then(r => r.text().then(text => ({ status: r.status, ok: r.ok, text })))
+          .then(({ status, ok, text }) => {
+            if (!ok) {
+              showSaved(`保存失败（服务器返回 ${status}）：${text.slice(0, 120)}`, false);
+              return;
+            }
+            let data;
+            try {
+              data = JSON.parse(text);
+            } catch (e) {
+              showSaved('保存失败（返回的不是预期的 JSON，可能没登录或者会话过期，试试刷新页面重新登录）', false);
+              return;
+            }
+            if (data.ok && !presetId && data.id) card.dataset.presetId = String(data.id);
+            showSaved(data.ok ? '已保存' : ('保存失败：' + data.message), data.ok);
+            if (data.ok) updateCollapsedLabels();
+          })
+          .catch(err => showSaved('保存失败（请求没发出去，检查一下网络连接）：' + err, false));
+      }
+
+      let saveTimer = null;
+      function scheduleSave() {
+        updateCollapsedLabels();
+        clearTimeout(saveTimer);
+        saveTimer = setTimeout(doSave, 800);
+      }
+
+      const editor = makeFieldListEditor(fieldsList, scheduleSave);
+      (preset.field_defs && preset.field_defs.length ? preset.field_defs : [{ name: '', aliases: [] }]).forEach(editor.addRow);
+
+      if (preset.id == null) {
+        const checkExistingMatch = function () {
+          if (matchedExistingCard) {
+            matchedExistingCard.style.boxShadow = '';
+            matchedExistingCard = null;
+          }
+          const hit = findMatchingSavedPreset(patternInput.value, card);
+          if (hit) {
+            matchedExistingCard = hit;
+            hit.style.boxShadow = '0 0 0 2px #2563eb';
+            const hitPattern = hit.querySelector('.vendor-preset-pattern').value;
+            matchNoticeEl.textContent = `这个发件人已经命中已有预设「${hitPattern}」（高亮的那张卡片），会直接沿用它的字段，不用重复添加。`;
+            matchNoticeEl.style.display = 'block';
+            fieldsList.style.display = 'none';
+            addFieldBtn.style.display = 'none';
+          } else {
+            matchNoticeEl.style.display = 'none';
+            fieldsList.style.display = '';
+            addFieldBtn.style.display = '';
+          }
+        };
+        patternInput.addEventListener('input', checkExistingMatch);
+      }
+
+      patternInput.addEventListener('input', scheduleSave);
+      saveBtn.addEventListener('click', () => {
+        clearTimeout(saveTimer);
+        doSave();
+      });
+      addFieldBtn.addEventListener('click', () => {
+        const row = editor.addRow();
+        row.querySelector('.extract-field-name').focus();
+        scheduleSave();
+      });
+
+      function handleDelete() {
+        if (matchedExistingCard) matchedExistingCard.style.boxShadow = '';
+        const presetId = card.dataset.presetId;
+        card.remove();
+        if (!presetId) return;
+        fetch(`/vendor-presets/${presetId}/delete`, {
+          method: 'POST',
+          headers: { 'X-Requested-With': 'XMLHttpRequest' },
+          body: vendorPresetFormData('', []),
+        }).catch(() => {});
+      }
+
+      deleteBtn.addEventListener('click', handleDelete);
+      quickDeleteBtn.addEventListener('click', handleDelete);
+
+      return card;
+    }
+
+    initialVendorPresets.forEach(buildVendorPresetCard);
+
+    addVendorPresetBtn.addEventListener('click', () => {
+      const card = buildVendorPresetCard({ id: null, match_pattern: '', field_defs: [] });
+      card.querySelector('.vendor-preset-pattern').focus();
+      card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    });
+    {% endif %}
+
+    // ---- "发件人包含"命中预设的可见提示：管理员在"按发件人配置专属字段"那张卡片里配的
+    // 预设是全站共享的，普通用户看不到、也改不了字段内容，但填"发件人包含"的时候应该能
+    // 看出自己填的这个发件人是不是命中了某条预设——不然像"暗箱操作"一样，不知道为什么
+    // 有些邮件提取出来的字段跟自己在"筛选条件"里配的默认字段不一样。这里只做匹配条件的
+    // 展示（vendor_preset_patterns 只有 match_pattern，没有字段内容），不暴露预设具体
+    // 配了哪些字段——跟后端 mail_sync.py 的判断逻辑保持一致但简化成前端字符串比较：
+    // 邮箱精确匹配，或者域名匹配（这个输入框允许逗号分隔多个词，每个词都单独判断一次）。
+    (function () {
+      const input = document.getElementById('search_sender_contains');
+      if (!input) return;
+      const patterns = {{ vendor_preset_patterns | tojson }};
+
+      // 根据输入词从已配置的预设 pattern 里找出命中的——跟后端同样的模糊规则：
+      // pattern 带 @ 就精确比邮箱，否则当域名比对；前端这里放宽一点，
+      // 只要词和 pattern 相互包含就算命中，真正精确判断以运行时后端为准。
+      function matchedPatterns() {
+        if (!patterns.length) return [];
+        const terms = input.value.split(',').map(t => t.trim().toLowerCase()).filter(t => t);
+        const hits = new Set();
+        terms.forEach(term => {
+          patterns.forEach(p => {
+            const pl = p.trim().toLowerCase();
+            if (!pl) return;
+            if (pl.includes(term) || term.includes(pl.replace(/^@/, ''))) hits.add(p);
+          });
+        });
+        return Array.from(hits);
+      }
+
+      {% if is_admin %}
+      // 管理员视角：发件人包含有内容且命中预设时，只显示命中的预设卡片，隐藏其余卡片
+      // 和默认字段区；输入为空或无命中时恢复全部显示。
+      // 注意：直接从 DOM 里读每张卡片的 .vendor-preset-pattern 值做匹配，而不是用
+      // 页面渲染时 Jinja 嵌入的静态 patterns 数组——这样管理员在当前页面新增/修改预设
+      // 并保存后，不需要刷新页面，发件人包含输入框里的高亮就能立刻跟上。
+      const vendorPresetsListEl = document.getElementById('vendor-presets-list');
+      const defaultFieldsSection = document.getElementById('default-fields-section');
+
+      function refreshAdminFilter() {
+        if (!vendorPresetsListEl || !defaultFieldsSection) return;
+        const terms = input.value.split(',').map(t => t.trim().toLowerCase()).filter(t => t);
+        if (!terms.length) {
+          // 输入为空：恢复全部显示
+          Array.from(vendorPresetsListEl.querySelectorAll('.vendor-preset-card')).forEach(c => { c.style.display = ''; });
+          defaultFieldsSection.style.display = 'block';
+          return;
+        }
+        // 直接拿 DOM 里每张卡片当前的发件人值做匹配，不依赖页面加载时快照的静态数组
+        let anyHit = false;
+        Array.from(vendorPresetsListEl.querySelectorAll('.vendor-preset-card')).forEach(c => {
+          if (!c.dataset.presetId) { c.style.display = ''; return; } // 未保存的新卡片始终显示
+          const patternEl = c.querySelector('.vendor-preset-pattern');
+          const pl = patternEl ? patternEl.value.trim().toLowerCase() : '';
+          if (!pl) { c.style.display = 'none'; return; }
+          // 跟后端 pick_field_defs_for_sender 同样的宽松规则：
+          // terms 里任意一个词跟 pl 相互包含（去掉 @ 前缀后比较）就算命中
+          const hit = terms.some(term => pl.includes(term) || term.includes(pl.replace(/^@/, '')));
+          c.style.display = hit ? '' : 'none';
+          if (hit) anyHit = true;
+        });
+        defaultFieldsSection.style.display = anyHit ? 'none' : 'block';
+      }
+      {% endif %}
+
+      {% if not is_admin %}
+      let senderManifestTimer = null;
+      function scheduleManifestRefreshBySender() {
+        clearTimeout(senderManifestTimer);
+        senderManifestTimer = setTimeout(() => {
+          currentManifestPage = 1;
+          refreshManifest(input.value.trim());
+        }, 600);
+      }
+      {% endif %}
+
+      function refresh() {
+        {% if is_admin %}
+        refreshAdminFilter();
+        {% else %}
+        const hits = matchedPatterns();
+        const hint = document.getElementById('vendor-preset-match-hint');
+        if (hint) {
+          if (hits.length) {
+            hint.textContent = `提示：填的内容可能命中已配置的发件人预设（${hits.join('、')}），这些发件人的邮件会改用管理员为它们配的专属字段，不用上面的默认字段。`;
+            hint.style.display = 'block';
+          } else {
+            hint.style.display = 'none';
+          }
+        }
+        // 发件人变了，延迟刷新表格，让服务器按新发件人挑对应的预设字段列
+        scheduleManifestRefreshBySender();
+        {% endif %}
+      }
+      input.addEventListener('input', refresh);
+      refresh();
+    })();
 
     // 勾选"启用 AI 从附件里提取字段"才展示下面详细的字段列表；不勾就整块收起来，
     // 不是简单变灰——字段本身还留在隐藏的 extract_fields 里，不会被清空，收起来

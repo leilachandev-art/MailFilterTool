@@ -12,6 +12,7 @@ import hashlib
 import os
 import re
 import shutil
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta
@@ -24,11 +25,55 @@ import zoho_search_api as zsearch
 import crypto_util as token_crypto
 import ai_extract
 import field_config
-from models import db, User, ProcessedMessage, ManifestEntry, RunLog, RunStatus
+from models import db, User, ProcessedMessage, ManifestEntry, RunLog, RunStatus, VendorFieldPreset
 from db_utils import commit_with_retry
 
 PAGE_SIZE = 200
 MAX_PAGES = 25  # 安全阀，避免筛选条件太宽泛时无限翻页
+
+# ---- 进程内停止标志（解决 SQLite 锁竞争时"停止"按钮失效的问题） ----
+# 问题背景：stop_run 路由需要往 SQLite 写 stop_requested=True，但后台同步线程会持续
+# 频繁写库，两者抢锁时 SQLite 会等最多 30 秒（busy_timeout）——路由迟迟拿不到锁就无法
+# 响应，浏览器 fetch 超时报 "TypeError: Failed to fetch"。
+# 解决方案：同时在进程内存里维护一个停止标志字典；stop_run 路由先设内存标志（立刻生效、
+# 不涉及任何数据库操作），再异步尝试写库；后台线程的 _stop_requested() 先查内存标志，
+# 查到就立刻停，不再等数据库——这样"停止"按钮点下去几乎立刻就能响应。
+_stop_flags: dict = {}          # user_id -> bool，进程内共享
+_stop_flags_lock = threading.Lock()
+
+# ---- 运行期错误计数（解决"运行中无法感知后台出错"的问题）----
+# log() 每次写 [出错] 前缀时在内存里累加；/run/status 接口把这个数字下发给前端，
+# 前端在运行期实时展示"已有 X 个错误"，不用等运行结束后才能看到 last_run_ok。
+_run_error_counts: dict = {}    # (user_id, run_id) -> int
+_run_error_lock = threading.Lock()
+
+
+def get_run_error_count(user_id: int, run_id: str) -> int:
+    with _run_error_lock:
+        return _run_error_counts.get((user_id, run_id), 0)
+
+
+def _increment_run_error(user_id: int, run_id: str) -> None:
+    with _run_error_lock:
+        key = (user_id, run_id)
+        _run_error_counts[key] = _run_error_counts.get(key, 0) + 1
+
+
+def _clear_run_errors(user_id: int, run_id: str) -> None:
+    with _run_error_lock:
+        _run_error_counts.pop((user_id, run_id), None)
+
+
+def request_stop(user_id: int) -> None:
+    """从 Flask 路由调用，立即在内存里设置停止标志，不依赖数据库写入成功。"""
+    with _stop_flags_lock:
+        _stop_flags[user_id] = True
+
+
+def _clear_stop_flag(user_id: int) -> None:
+    """新一次运行开始时清掉上一次遗留的停止标志，避免"刚点了停止，再点运行，立刻又被停"。"""
+    with _stop_flags_lock:
+        _stop_flags.pop(user_id, None)
 
 DOWNLOADS_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run_downloads")
 DOWNLOADS_KEEP_DAYS = 3  # 超过这么多天没人下载的旧运行临时文件，下次跑的时候顺手清掉，避免服务器磁盘被占满
@@ -91,14 +136,30 @@ def log(app, user_id, run_id, message):
     """写一条日志。这个函数在同步循环里调用非常频繁（几乎每封邮件都可能触发），
     如果因为一时锁冲突写失败，只打印到控制台兜底，绝不能让"记日志"这个动作本身
     把整个同步任务搞崩——那样用户反而看不到任何有用的错误信息。"""
+    is_error = message.startswith("[出错]")
+    if is_error:
+        # 内存计数立即更新，不依赖数据库写入成功——前端轮询 /run/status 就能
+        # 实时拿到"运行中已出现 X 个错误"的数字，不用等运行结束。
+        _increment_run_error(user_id, run_id)
+
     with app.app_context():
         try:
             db.session.add(RunLog(user_id=user_id, run_id=run_id, message=message))
-            if message.startswith("[出错]"):
+            if is_error:
                 # 非管理员看不到详细日志，只看得到"运行正常"还是"上次运行出错"这种粗粒度
                 # 状态，这里顺手记一下。一次运行里只要出过一次错就标 False，不会被同一次
                 # 运行里后面的正常日志重新翻回 True（要等下一次运行开始时才重置）。
-                status = RunStatus.query.get(user_id)
+                # 用 no_autoflush 包住这个查询：SQLAlchemy 默认在执行任何查询前会先把
+                # session 里待提交的修改 flush 到数据库；但此时外层同步循环里可能已经
+                # add() 了一些还没 commit 的对象（比如刚下载完某个附件对应的
+                # ManifestEntry），autoflush 触发时如果数据库被另一个线程（比如前端的
+                # poll 请求）持有写锁，就会直接拿到 "database is locked" 错误，导致
+                # 整条日志写库失败、控制台打出 "[写日志失败]"。no_autoflush 只是告诉
+                # SQLAlchemy "这个查询之前不要自动 flush"，不影响后面的 commit，
+                # 也不会让那些待提交的对象丢失——它们还在 session 里，等正常的
+                # commit_with_retry 提交。
+                with db.session.no_autoflush:
+                    status = RunStatus.query.get(user_id)
                 if status:
                     status.last_run_ok = False
             commit_with_retry(db.session)
@@ -111,7 +172,9 @@ def run_sync_for_user(app, user_id, run_id=None, download_attachments=True):
     """download_attachments=False 时是"仅导出标题"快速模式：跳过附件元数据查询和下载，
     只用 Zoho 搜索结果本身自带的 subject/sender/date 记录，命中多少邮件几乎是秒级的，
     适合只是想要批量拿邮件标题（比如从标题里解析 container 号）去做后续处理的场景。"""
+    _clear_stop_flag(user_id)  # 每次新运行开始时清掉上一次遗留的停止标志
     run_id = run_id or uuid.uuid4().hex[:12]
+    _clear_run_errors(user_id, run_id)  # 清掉同一个 run_id 可能遗留的旧计数（理论上不会，防御性清理）
 
     try:
         # 这一步本身也可能失败（比如数据库文件被占用），放进 try 里，
@@ -170,6 +233,10 @@ def _prune_old_logs(app, user_id):
 
 
 def _stop_requested(user_id):
+    # 先查内存标志（不涉及数据库，立刻知道结果）；再查数据库做兜底
+    with _stop_flags_lock:
+        if _stop_flags.get(user_id):
+            return True
     status = RunStatus.query.get(user_id)
     return bool(status and status.stop_requested)
 
@@ -242,7 +309,21 @@ def _do_sync(app, user_id, run_id, download_attachments=True):
         configured_field_defs = field_config.parse_extract_fields(user.extract_fields)
         configured_field_names = [f["name"] for f in configured_field_defs]
         extract_field_defs = configured_field_defs if user.ai_extract_enabled else []
-        if download_attachments and configured_field_defs:
+
+        # 按发件人配的字段预设：邮箱/域名命中了哪条，这封邮件的附件就按那条预设的字段
+        # 提取，不用全局默认的 extract_field_defs——具体匹配规则见
+        # field_config.pick_field_defs_for_sender()。这份预设是全站共享的（管理员统一
+        # 维护，不分用户），所以这里不按 user_id 过滤。跟全局字段一样受 ai_extract_enabled
+        # 这个总开关控制：开关关了，预设也一起停，不会出现"关了 AI 提取，但配了预设的
+        # 供应商还在偷偷调用"这种情况。
+        vendor_presets = []
+        if user.ai_extract_enabled:
+            vendor_presets = [
+                (p.match_pattern, field_config.parse_extract_fields(p.extract_fields))
+                for p in VendorFieldPreset.query.order_by(VendorFieldPreset.id.asc()).all()
+            ]
+
+        if download_attachments and (configured_field_defs or vendor_presets):
             if not user.ai_extract_enabled:
                 log(
                     app, user_id, run_id,
@@ -254,13 +335,23 @@ def _do_sync(app, user_id, run_id, download_attachments=True):
                 if ai_problem:
                     log(app, user_id, run_id, f"[提示] AI 提取字段这个功能现在用不了：{ai_problem}")
                 else:
-                    log(app, user_id, run_id, f"下载 PDF 附件时会用 AI 提取这些字段：{'、'.join(configured_field_names)}")
+                    log(app, user_id, run_id, f"下载 PDF 附件时会用 AI 提取这些字段（默认）：{'、'.join(configured_field_names) or '（未配置，只有命中下面预设的发件人才会提取字段）'}")
                     fields_with_aliases = [f["name"] for f in configured_field_defs if f["aliases"]]
                     if fields_with_aliases:
                         log(
                             app, user_id, run_id,
                             f"[提示] 这些字段配了备选名称，AI 会按优先级依次尝试匹配文档里实际出现的叫法："
                             f"{'、'.join(fields_with_aliases)}。",
+                        )
+                    if vendor_presets:
+                        preset_desc = "；".join(
+                            f"{pattern} → {'、'.join(f['name'] for f in field_defs) or '（未配置字段）'}"
+                            for pattern, field_defs in vendor_presets
+                        )
+                        log(
+                            app, user_id, run_id,
+                            f"[提示] 已配置 {len(vendor_presets)} 个按发件人的字段预设，发件人邮箱/域名命中时"
+                            f"改用预设自己的字段列表（不叠加默认字段）：{preset_desc}",
                         )
                     # 注意：这条提示只是「顺手告诉你有 container 类字段」，不代表只有配了这种
                     # 字段名的用户才会拆行——AI 现在会自己判断配置的字段里有没有哪个是「每笔
@@ -396,6 +487,12 @@ def _do_sync(app, user_id, run_id, download_attachments=True):
                         )
 
                     if attachments:
+                        # 这封邮件的发件人如果命中了某条按 vender 配的字段预设，这封邮件的所有
+                        # 附件都按那条预设的字段列表提取，不用全局默认的 extract_field_defs——
+                        # 同一封邮件里的附件共用同一个发件人，只用算一次。
+                        this_field_defs = field_config.pick_field_defs_for_sender(
+                            sender_email, extract_field_defs, vendor_presets
+                        )
                         # 有附件：每个附件先算出它对应几"行"（一份账单可能横跨好几个 container，
                         # 每个 container 拆成单独一行，方便后续按 container 对账/筛选/汇总；
                         # 具体拆几行由 ai_extract.extract_line_items_from_pdf 决定，没有 container
@@ -445,15 +542,27 @@ def _do_sync(app, user_id, run_id, download_attachments=True):
                                     # extract_line_items_from_pdf 会带着具体原因回来，记进日志方便
                                     # 排查，不管提取成不成功都不影响附件本身已经下载成功这件事。
                                     items = [{}]
-                                    if filename.lower().endswith(".pdf") and extract_field_defs:
+                                    if filename.lower().endswith(".pdf") and this_field_defs:
                                         items, extract_error = ai_extract.extract_line_items_from_pdf(
-                                            content, extract_field_defs
+                                            content, this_field_defs
                                         )
                                         if extract_error:
-                                            # extract_error 不一定是"失败"——也可能是提取成功了，但某个值没通过
-                                            # 格式校验（比如 container 号校验位不对）这种"建议人工核对一下"的提示，
-                                            # 所以这里措辞不要预设成"没成功"，具体是哪种情况看 extract_error 内容。
-                                            log(app, user_id, run_id, f"[提示] 附件 {filename} 的 AI 提取：{extract_error}（附件本身已正常下载）")
+                                            # 区分两种情况：
+                                            # 1. 真正的 AI 调用失败（API Key 无效/模型名错误/网络超时等）：
+                                            #    items 里所有字段都是 None——用 [出错] 前缀记日志，
+                                            #    这样 RunStatus.last_run_ok 会被标成 False，非管理员
+                                            #    用户也能看到"上次运行出错了"的提示，而不是默默
+                                            #    看到一堆空字段、不知道为什么。
+                                            # 2. 提取成功但有格式校验提示（比如 container 号校验位不对）：
+                                            #    items 里有至少一个非空字段——用 [提示] 记日志，
+                                            #    不算运行出错，只是建议人工核对一下原件。
+                                            all_extracted_empty = all(
+                                                v is None
+                                                for item in items
+                                                for v in item.values()
+                                            )
+                                            log_prefix = "[出错]" if all_extracted_empty else "[提示]"
+                                            log(app, user_id, run_id, f"{log_prefix} 附件 {filename} 的 AI 提取：{extract_error}（附件本身已正常下载）")
                                         elif len(items) > 1:
                                             log(app, user_id, run_id, f"[提示] 附件 {filename} 识别到 {len(items)} 个 container/费用分组，已按 container 拆成 {len(items)} 行。")
 

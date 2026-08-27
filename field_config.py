@@ -72,6 +72,43 @@ def serialize_extract_fields(field_defs):
     return json.dumps(cleaned, ensure_ascii=False)
 
 
+def pick_field_defs_for_sender(sender_email, global_field_defs, presets):
+    """按发件人邮箱，从"按 vender 配置的字段预设"里挑出这封邮件该用哪一份字段定义。
+
+    presets 是 [(match_pattern, field_defs), ...] 这样的列表（field_defs 已经是
+    parse_extract_fields() 解析过的结构，不是原始字符串），调用方一般从
+    VendorFieldPreset 表查出来后自己拼成这个形状传进来——这个函数本身不碰数据库，
+    方便单独测试。
+
+    匹配规则：
+    - match_pattern 里带 "@"，当成完整邮箱地址，大小写不敏感精确匹配发件人邮箱；
+    - 不带 "@"，当成域名，大小写不敏感匹配发件人邮箱 "@" 后面的部分（前面多打的
+      "@" 会自动去掉，不用纠结用户填的是 "ascendtms.com" 还是 "@ascendtms.com"）。
+    同一个发件人如果精确邮箱和域名两条预设都能匹配上，精确邮箱优先（更具体的规则
+    优先于更宽泛的规则）；同一优先级里有多条都能匹配上，取配置顺序里第一条命中的。
+
+    都没匹配上、或者匹配上的那条预设本身没配任何字段，就退回 global_field_defs
+    （全局默认字段），不会因为配了一条空预设就让这个发件人一个字段都提取不出来。"""
+    sender_email = (sender_email or "").strip().lower()
+    domain = sender_email.rsplit("@", 1)[1] if "@" in sender_email else ""
+
+    exact_match = None
+    domain_match = None
+    for pattern, field_defs in presets or []:
+        pattern = (pattern or "").strip().lower()
+        if not pattern or not sender_email:
+            continue
+        if "@" in pattern:
+            if exact_match is None and pattern == sender_email:
+                exact_match = field_defs
+        else:
+            if domain_match is None and domain and pattern.lstrip("@") == domain:
+                domain_match = field_defs
+
+    chosen = exact_match if exact_match else domain_match
+    return chosen if chosen else global_field_defs
+
+
 def field_looks_like_container(field_def_or_name):
     """判断某个字段是不是 container/集装箱相关——可以传字段名字符串，也可以传
     {"name":..., "aliases":[...]} 这种字段定义；名字或者任意一个备选名里带关键词就算。"""

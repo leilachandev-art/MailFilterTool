@@ -124,6 +124,34 @@ class ManifestEntry(db.Model):
         self.extracted_fields_json = json.dumps(value or {}, ensure_ascii=False)
 
 
+class VendorFieldPreset(db.Model):
+    """按发件人给"AI 从附件里提取哪些字段"配一份专属预设：某封邮件的发件人邮箱/域名命中
+    了某条预设，这封邮件的附件就按这条预设的字段列表提取，不用全局那一份（user.extract_fields）；
+    没有任何预设命中的发件人，仍然照旧用全局默认字段。用途：不同供应商的账单关心的信息、
+    字段叫法都不一样，没必要为了照顾所有供应商硬把全局字段列表配得又长又什么都匹配不准——
+    比如 sentfrom@ascendtms.com 只关心 A/B/C 这几个字段，info@freightcom.com 只关心
+    D/E/F，两边互不干扰。
+
+    这份预设是全站共享的（不挂在具体某个用户名下）：由管理员统一维护"发件人 → 字段列表"
+    这套映射，谁的邮箱/域名命中了，运行时都会自动用上，不需要每个普通用户自己配一遍、也不该
+    让普通用户随便改字段（改错了会影响所有人）——普通用户在界面上只能看到"发件人是否命中了
+    某条预设"这个提示，看不到、改不了字段列表本身；管理员在专门的卡片里维护增删改，
+    具体权限判断在 app.py 的路由里做（is_admin_user()），不是靠前端隐藏。
+
+    match_pattern：可以填完整邮箱地址（比如 info@freightcom.com，大小写不敏感，只精确
+    匹配这一个地址），也可以只填域名（比如 ascendtms.com，前面多打的 @ 会自动去掉，
+    匹配这个域名下的所有发件人）。判断逻辑统一放在 field_config.pick_field_defs_for_sender()。
+
+    extract_fields 存法跟 User.extract_fields 完全一样（同一套 JSON 格式，同样用
+    field_config.parse_extract_fields()/serialize_extract_fields() 解析/序列化），
+    不另外维护一套格式，改一处两边都生效。"""
+
+    id = db.Column(db.Integer, primary_key=True)
+    match_pattern = db.Column(db.String(255), nullable=False)
+    extract_fields = db.Column(db.Text, default="")
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
 class RunLog(db.Model):
     """每次运行的日志行，前端轮询展示进度。"""
 
