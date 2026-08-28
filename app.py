@@ -860,6 +860,13 @@ def register_routes(app):
                 domain = email.split("@", 1)[1]
                 score[domain] += cnt
 
+        # 把管理员配的供应商预设 match_pattern 也加入候选（给一个基础分，保证没跑过也能推荐）
+        for preset in VendorFieldPreset.query.all():
+            pat = (preset.match_pattern or "").strip().lower()
+            if pat:
+                score.setdefault(pat, 0)
+                score[pat] = max(score[pat], 1)
+
         # 过滤匹配 q 的项，按分数排序，最多返回 10 条
         results = sorted(
             [(k, v) for k, v in score.items() if not q or q in k],
