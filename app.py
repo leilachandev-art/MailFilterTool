@@ -114,6 +114,33 @@ def is_admin_user(user):
     return bool(first_user and first_user.id == user.id)
 
 
+# ── 一次性预设种子（生产库首次部署时写入，已存在则跳过） ──────────────────────
+_PRESET_SEEDS = [
+    {
+        "match_pattern": "sentfrom@ascendtms.com",
+        "extract_fields": '[{"name": "Date", "aliases": []}, {"name": "Reference", "aliases": []}, {"name": "Amount", "aliases": []}, {"name": "Total", "aliases": []}]',
+    },
+    {
+        "match_pattern": "info@freightcom.com",
+        "extract_fields": '[{"name": "Invoice Date", "aliases": []}, {"name": "Amount Paid", "aliases": []}, {"name": "BOL", "aliases": []}, {"name": "Customer Ref", "aliases": []}, {"name": "Charges", "aliases": []}]',
+    },
+    {
+        "match_pattern": "accounts@kwalitylogistics.com",
+        "extract_fields": '[{"name": "Date", "aliases": []}, {"name": "Invoice", "aliases": []}, {"name": "Container", "aliases": []}, {"name": "Cust. Ref.#", "aliases": []}, {"name": "Charges", "aliases": []}, {"name": "Grand Total", "aliases": []}]',
+    },
+]
+
+
+def _seed_vendor_presets():
+    if VendorFieldPreset.query.first():
+        return
+    for p in _PRESET_SEEDS:
+        db.session.add(VendorFieldPreset(**p))
+    commit_with_retry(db.session)
+    print(f"[seed] 已写入 {len(_PRESET_SEEDS)} 条供应商预设")
+# ─────────────────────────────────────────────────────────────────────────────
+
+
 def create_app():
     app = Flask(__name__)
     app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
@@ -165,6 +192,7 @@ def create_app():
     with app.app_context():
         db.create_all()
         _run_lightweight_migrations()
+        _seed_vendor_presets()
         # 清理服务器重启前残留的 is_running=True 状态
         stale = RunStatus.query.filter_by(is_running=True).all()
         if stale:
