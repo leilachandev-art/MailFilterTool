@@ -205,10 +205,16 @@
             {% for name in extract_field_names %}<td>{{ fields.get(name) or '' }}</td>{% endfor %}
           </tr>
           {% else %}
-          <tr><td colspan="{{ 5 + extract_field_names|length }}" style="color:#999;">还没有记录</td></tr>
+          <tr><td colspan="{{ 5 + extract_field_names|length }}"></td></tr>
           {% endfor %}
         </tbody>
       </table>
+
+      <div id="manifest-empty-state" style="display:{{ 'flex' if not entries else 'none' }}; flex-direction:column; align-items:center; justify-content:center; padding:40px 20px; gap:10px; text-align:center;">
+        <div style="font-size:32px; line-height:1;">📭</div>
+        <div id="manifest-empty-title" style="font-size:15px; font-weight:600; color:var(--color-text);">{{ '筛选条件没有匹配到任何邮件' if status else '还没有运行过' }}</div>
+        <div id="manifest-empty-hint" style="font-size:13px; color:var(--color-text-muted);">{{ '请检查筛选条件后重新运行，或点击"仅导出标题"快速预览匹配情况。' if status else '配置好筛选条件后，点击"立即运行"开始扫描邮件。' }}</div>
+      </div>
 
       <div id="manifest-pagination">
         {% if total_pages and total_pages > 1 %}
@@ -329,9 +335,18 @@
         + fieldNames.map(n => `<th>${escapeHtml(n)}</th>`).join('');
 
       const fieldCount = fieldNames.length;
+      const emptyState = document.getElementById('manifest-empty-state');
+      const emptyTitle = document.getElementById('manifest-empty-title');
+      const emptyHint = document.getElementById('manifest-empty-hint');
       if (!data.entries.length) {
-        manifestTbody.innerHTML = `<tr><td colspan="${5 + fieldCount}" style="color:#999;">还没有记录</td></tr>`;
+        manifestTbody.innerHTML = `<tr><td colspan="${5 + fieldCount}"></td></tr>`;
+        if (emptyState) {
+          emptyTitle.textContent = data.total_entries === 0 ? '筛选条件没有匹配到任何邮件' : '当前页无记录';
+          emptyHint.textContent = '请检查筛选条件后重新运行，或点击"仅导出标题"快速预览匹配情况。';
+          emptyState.style.display = 'flex';
+        }
       } else {
+        if (emptyState) emptyState.style.display = 'none';
         manifestTbody.innerHTML = data.entries.map(e => {
           const fieldCells = (e.fields || []).map(v => `<td>${escapeHtml(v)}</td>`).join('');
           const noteCell = e.is_duplicate
