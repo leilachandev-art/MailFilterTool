@@ -300,6 +300,7 @@ def _do_sync(app, user_id, run_id, download_attachments=True):
         log(app, user_id, run_id, f"用 Zoho 搜索条件：{search_key}")
 
         exclude_terms = _split(user.search_sender_excludes)
+        attachment_kws = _split(user.search_attachment_contains)  # 附件文件名关键词（客户端二次过滤）
         # ai_extract_enabled 是独立于"填了哪些字段"的开关：关掉的话字段列表还留着（下次
         # 重新打开不用重新敲一遍），只是这次运行不会真的调用 AI，也就不会有对应费用。
         # configured_field_defs 是 [{"name":..., "aliases":[...]}, ...] 这种结构化的字段
@@ -499,6 +500,11 @@ def _do_sync(app, user_id, run_id, download_attachments=True):
                         # 类字段或者本来就只有一个 container 的话，就是最常见的"一份附件一行"）。
                         for a in attachments:
                             filename = safe_filename(a.get("attachmentName", "attachment"))
+                            # Zoho 的 fileName 搜索是"这封邮件里至少一个附件的文件名匹配"，
+                            # 但返回的是整封邮件的所有附件——这里做客户端二次过滤，
+                            # 只保留文件名里包含用户指定关键词的附件，跳过同邮件里不匹配的其他附件。
+                            if attachment_kws and not _match_any(filename, attachment_kws):
+                                continue
                             content = zmail.download_attachment(
                                 access_token, user.zoho_api_domain, user.zoho_account_id,
                                 msg_folder_id, message_id, a.get("attachmentId"),
@@ -631,8 +637,12 @@ def _do_sync(app, user_id, run_id, download_attachments=True):
                                     entry.extracted_fields = item_fields
                                     db.session.add(entry)
                     else:
-                        # 没有附件：也要记一行，只填标题/发件人/日期，方便批量导出邮件标题
-                        # 到 Excel 做后续处理（比如从标题里解析 container 号）。
+                        # 没有附件：正常情况下也要记一行，方便批量导出邮件标题到 Excel。
+                        # 但如果用户设了"附件文件名含"筛选条件，说明他只想看带特定附件的邮件，
+                        # 这种没有附件的邮件就不该出现在结果里——跳过，不记录也不标已处理，
+                        # 这样下次运行如果换了筛选条件还能重新捡起来。
+                        if attachment_kws:
+                            continue
                         new_matched += 1
                         if status:
                             status.matched_count = new_matched
