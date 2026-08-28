@@ -403,8 +403,11 @@ def register_routes(app):
             page=page,
             total_pages=total_pages,
             total_entries=total_entries,
-            # 管理员视角显示所有预设字段列；普通用户按已保存的发件人过滤值挑预设。
-            extract_field_names=_active_field_names(user) if effective_is_admin else _pick_field_names_for_member(user, user.search_sender_contains),
+            # AI 提取未启用时不显示任何字段列；启用时管理员显示全部预设字段，普通用户按发件人挑预设。
+            extract_field_names=(
+                (_active_field_names(user) if effective_is_admin else _pick_field_names_for_member(user, user.search_sender_contains))
+                if user.ai_extract_enabled else []
+            ),
             extract_field_defs=field_config.parse_extract_fields(user.extract_fields),
             # vendor_presets 完整内容只给管理员用于渲染/编辑。
             # vendor_preset_patterns 给所有用户做"发件人命中提示"。
@@ -467,7 +470,9 @@ def register_routes(app):
         real_is_admin = is_admin_user(user)
         previewing_member = real_is_admin and request.args.get("view") == "member"
         effective_is_admin = real_is_admin and not previewing_member
-        if effective_is_admin:
+        if not user.ai_extract_enabled:
+            field_names = []
+        elif effective_is_admin:
             field_names = _active_field_names(user)
         else:
             # 前端把当前"发件人包含"输入框的值传过来，据此挑对应预设的字段列
