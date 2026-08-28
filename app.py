@@ -114,6 +114,31 @@ def is_admin_user(user):
     return bool(first_user and first_user.id == user.id)
 
 
+_PRESET_SEEDS = [
+    {
+        "match_pattern": "sentfrom@ascendtms.com",
+        "extract_fields": '[{"name": "Date", "aliases": []}, {"name": "Reference", "aliases": []}, {"name": "Amount", "aliases": []}, {"name": "Total", "aliases": []}]',
+    },
+    {
+        "match_pattern": "info@freightcom.com",
+        "extract_fields": '[{"name": "Invoice Date", "aliases": []}, {"name": "Amount Paid", "aliases": []}, {"name": "BOL", "aliases": []}, {"name": "Customer Ref", "aliases": []}, {"name": "Charges", "aliases": []}]',
+    },
+    {
+        "match_pattern": "accounts@kwalitylogistics.com",
+        "extract_fields": '[{"name": "Date", "aliases": []}, {"name": "Invoice", "aliases": []}, {"name": "Container", "aliases": []}, {"name": "Cust. Ref.#", "aliases": []}, {"name": "Charges", "aliases": []}, {"name": "Grand Total", "aliases": []}]',
+    },
+]
+
+
+def _seed_vendor_presets():
+    if VendorFieldPreset.query.first():
+        return
+    for p in _PRESET_SEEDS:
+        db.session.add(VendorFieldPreset(**p))
+    commit_with_retry(db.session)
+    print(f"[seed] 已写入 {len(_PRESET_SEEDS)} 条供应商预设")
+
+
 def create_app():
     app = Flask(__name__)
     app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
@@ -807,6 +832,40 @@ def register_routes(app):
             payload["matched"] = status.matched_count if status else 0
             payload["saved"] = status.saved_count if status else 0
         return jsonify(payload)
+
+    @app.route("/api/sender-suggestions")
+    def sender_suggestions():
+        user = current_user()
+        if not user:
+            return jsonify([]), 401
+        q = (request.args.get("q") or "").strip().lower()
+        # 查当前用户所有处理记录里的发件人邮箱，按出现次数降序
+        rows = (
+            db.session.query(ManifestEntry.sender_email, func.count().label("cnt"))
+            .filter(ManifestEntry.user_id == user.id, ManifestEntry.sender_email.isnot(None))
+            .group_by(ManifestEntry.sender_email)
+            .order_by(func.count().desc())
+            .limit(200)
+            .all()
+        )
+        # 构建：完整邮箱 + 域名，都按频率累加
+        from collections import defaultdict
+        score = defaultdict(int)
+        for email, cnt in rows:
+            email = email.strip().lower()
+            if not email:
+                continue
+            score[email] += cnt
+            if "@" in email:
+                domain = email.split("@", 1)[1]
+                score[domain] += cnt
+
+        # 过滤匹配 q 的项，按分数排序，最多返回 10 条
+        results = sorted(
+            [(k, v) for k, v in score.items() if not q or q in k],
+            key=lambda x: -x[1]
+        )[:10]
+        return jsonify([r[0] for r in results])
 
 
 # 存 app 引用供后台线程使用，避免跨线程使用 current_app 代理对象。

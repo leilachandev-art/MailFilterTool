@@ -51,7 +51,10 @@
         <input type="text" name="search_attachment_contains" value="{{ user.search_attachment_contains }}" placeholder="invoice, statement">
 
         <label>发件人包含</label>
-        <input type="text" name="search_sender_contains" id="search_sender_contains" value="{{ user.search_sender_contains }}" placeholder="vendor.com 或 ap@vendor.com">
+        <div style="position:relative;">
+          <input type="text" name="search_sender_contains" id="search_sender_contains" value="{{ user.search_sender_contains }}" placeholder="vendor.com 或 ap@vendor.com" autocomplete="off">
+          <ul id="sender-suggestions" style="display:none; position:absolute; top:100%; left:0; right:0; z-index:100; margin:2px 0 0; padding:0; list-style:none; background:var(--color-card,#fff); border:1px solid var(--color-border,#e5e7eb); border-radius:6px; box-shadow:0 4px 12px rgba(0,0,0,.08); max-height:220px; overflow-y:auto;"></ul>
+        </div>
         <p class="hint" id="vendor-preset-match-hint" style="display:none; margin-top:4px;"></p>
 
         <label>正文包含</label>
@@ -173,11 +176,10 @@
       <div style="margin-bottom:12px;">
         <a class="btn btn-secondary" href="{{ url_for('export_excel') }}">导出 Excel</a>
       </div>
-      <div class="table-scroll">
       <table>
         <thead>
           <tr id="manifest-header-row">
-            <th>发件人名</th><th>发件人邮箱</th><th class="cell-wrap">主题</th><th>附件标题</th><th>备注</th>
+            <th>发件人名</th><th>发件人邮箱</th><th>主题</th><th>附件标题</th><th>备注</th>
             {% for name in extract_field_names %}<th>{{ name }}</th>{% endfor %}
           </tr>
         </thead>
@@ -207,7 +209,6 @@
           {% endfor %}
         </tbody>
       </table>
-      </div><!-- /.table-scroll -->
 
       <div id="manifest-pagination">
         {% if total_pages and total_pages > 1 %}
@@ -324,7 +325,7 @@
       // 还是旧的，看起来就像"新增的列没生效"——这是导致这个问题的一个真实原因。
       const fieldNames = data.field_names || [];
       manifestHeaderRow.innerHTML =
-        '<th>发件人名</th><th>发件人邮箱</th><th class="cell-wrap">主题</th><th>附件标题</th><th>备注</th>'
+        '<th>发件人名</th><th>发件人邮箱</th><th>主题</th><th>附件标题</th><th>备注</th>'
         + fieldNames.map(n => `<th>${escapeHtml(n)}</th>`).join('');
 
       const fieldCount = fieldNames.length;
@@ -1005,12 +1006,104 @@
             hint.style.display = 'none';
           }
         }
-        // 发件人变了，延迟刷新表格，让服务器按新发件人挑对应的预设字段列
         scheduleManifestRefreshBySender();
         {% endif %}
       }
       input.addEventListener('input', refresh);
       refresh();
+
+      // ── 发件人输入框：智能推荐 ─────────────────────────────────
+      (function () {
+        const suggestBox = document.getElementById('sender-suggestions');
+        if (!suggestBox) return;
+        let fetchTimer = null;
+        let activeIdx = -1;
+
+        function renderSuggestions(items) {
+          if (!items.length) { hideSuggestions(); return; }
+          suggestBox.innerHTML = items.map((item, i) =>
+            `<li data-idx="${i}" style="padding:8px 12px; cursor:pointer; font-size:13px; border-bottom:1px solid var(--color-border,#f0f0f0);">${escapeHtml(item)}</li>`
+          ).join('');
+          suggestBox.style.display = 'block';
+          activeIdx = -1;
+        }
+
+        function hideSuggestions() {
+          suggestBox.style.display = 'none';
+          suggestBox.innerHTML = '';
+          activeIdx = -1;
+        }
+
+        function highlightItem(idx) {
+          const items = suggestBox.querySelectorAll('li');
+          items.forEach((li, i) => {
+            li.style.background = i === idx ? 'var(--color-primary-light, #eff6ff)' : '';
+          });
+        }
+
+        function fetchSuggestions(q) {
+          clearTimeout(fetchTimer);
+          fetchTimer = setTimeout(() => {
+            fetch(`/api/sender-suggestions?q=${encodeURIComponent(q)}`)
+              .then(r => r.json())
+              .then(renderSuggestions)
+              .catch(() => {});
+          }, 150);
+        }
+
+        // 输入时拉推荐
+        input.addEventListener('input', () => {
+          const q = input.value.trim();
+          if (!q) { hideSuggestions(); return; }
+          fetchSuggestions(q);
+        });
+
+        // 键盘导航
+        input.addEventListener('keydown', e => {
+          const items = suggestBox.querySelectorAll('li');
+          if (!items.length) return;
+          if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            activeIdx = Math.min(activeIdx + 1, items.length - 1);
+            highlightItem(activeIdx);
+          } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            activeIdx = Math.max(activeIdx - 1, 0);
+            highlightItem(activeIdx);
+          } else if (e.key === 'Enter' && activeIdx >= 0) {
+            e.preventDefault();
+            input.value = items[activeIdx].textContent;
+            hideSuggestions();
+            refresh();
+          } else if (e.key === 'Escape') {
+            hideSuggestions();
+          }
+        });
+
+        // 点击选中
+        suggestBox.addEventListener('mousedown', e => {
+          const li = e.target.closest('li');
+          if (!li) return;
+          e.preventDefault();
+          input.value = li.textContent;
+          hideSuggestions();
+          refresh();
+        });
+
+        // hover 高亮
+        suggestBox.addEventListener('mouseover', e => {
+          const li = e.target.closest('li');
+          if (!li) return;
+          activeIdx = parseInt(li.dataset.idx);
+          highlightItem(activeIdx);
+        });
+
+        // 点击其他地方关闭
+        document.addEventListener('click', e => {
+          if (!input.contains(e.target) && !suggestBox.contains(e.target)) hideSuggestions();
+        });
+      })();
+      // ─────────────────────────────────────────────────────────
     })();
 
     // 勾选"启用 AI 从附件里提取字段"才展示下面详细的字段列表；不勾就整块收起来，
