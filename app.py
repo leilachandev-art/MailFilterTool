@@ -278,16 +278,23 @@ def _active_field_names(user):
 
 def _pick_field_names_for_member(user, sender_raw):
     """普通用户/预览成员视角下，按发件人值挑选字段列名：
-    comma-split 后依次尝试每个 token，第一个命中 vendor 预设的就用那条预设的字段；
-    全部 token 都没命中时退回全局字段。"""
+    comma-split 后对每个 token 都尝试匹配 vendor 预设，把所有命中预设的字段取并集；
+    全部 token 都没命中时，退回全局默认字段。"""
     global_defs = field_config.parse_extract_fields(user.extract_fields)
     all_presets = VendorFieldPreset.query.order_by(VendorFieldPreset.id.asc()).all()
+    matched_names: list[str] = []
+    seen: set[str] = set()
     if all_presets:
         presets_data = [(p.match_pattern, field_config.parse_extract_fields(p.extract_fields)) for p in all_presets]
         for token in [t.strip() for t in (sender_raw or "").split(",") if t.strip()]:
             chosen = field_config.pick_field_defs_for_sender(token, global_defs, presets_data)
             if chosen is not global_defs:
-                return [f["name"] for f in chosen]
+                for f in chosen:
+                    if f["name"] not in seen:
+                        seen.add(f["name"])
+                        matched_names.append(f["name"])
+    if matched_names:
+        return matched_names
     return field_config.field_names_only(user.extract_fields)
 
 
@@ -671,7 +678,9 @@ def register_routes(app):
 
     @app.route("/export_excel")
     def export_excel():
-        """导出所有处理记录为 Excel：固定列 + AI 提取字段列（只导出有值的列）。"""
+        """导出处理记录为 Excel：按发件人匹配的供应商预设分 sheet，
+        每个 sheet 只含该预设的字段列；无匹配预设的记录放「默认字段」sheet。"""
+        import re as _re
         user = current_user()
         if not user:
             return redirect(url_for("index"))
@@ -684,55 +693,87 @@ def register_routes(app):
             .order_by(ManifestEntry.created_at.desc(), ManifestEntry.id.desc())
             .all()
         )
-        field_names = _all_extract_field_names(user)
-        # 只保留本次数据中有值的字段列，避免大量空列。
-        if rows and field_names:
-            cols_with_data = {
-                name for r in rows
-                for name, val in r.extracted_fields.items()
-                if val and name in field_names
-            }
-            field_names = [n for n in field_names if n in cols_with_data] or field_names
+
+        global_defs = field_config.parse_extract_fields(user.extract_fields)
+        global_field_names = field_config.field_names_only(user.extract_fields)
+        all_presets = VendorFieldPreset.query.order_by(VendorFieldPreset.id.asc()).all()
+        presets_data = [
+            (p.match_pattern, field_config.parse_extract_fields(p.extract_fields))
+            for p in all_presets
+        ]
+
+        # 按预设分组：{match_pattern: [rows]}，未命中的放 default_rows
+        from collections import OrderedDict
+        groups: OrderedDict[str, list] = OrderedDict()
+        pattern_fields: dict[str, list[str]] = {}
+        default_rows: list = []
+
+        for e in rows:
+            sender = (e.sender_email or "").strip()
+            assigned = False
+            for pattern, field_defs in presets_data:
+                chosen = field_config.pick_field_defs_for_sender(sender, global_defs, [(pattern, field_defs)])
+                if chosen is not global_defs:
+                    if pattern not in groups:
+                        groups[pattern] = []
+                        pattern_fields[pattern] = [f["name"] for f in field_defs]
+                    groups[pattern].append(e)
+                    assigned = True
+                    break
+            if not assigned:
+                default_rows.append(e)
 
         fixed_headers = ["发件人名", "发件人邮箱", "主题", "附件标题", "下载链接", "备注"]
-        headers = fixed_headers + [f"{name}(AI提取)" for name in field_names]
-        link_col = fixed_headers.index("下载链接") + 1
+        fixed_widths = [22, 28, 34, 34, 46, 34]
+        link_col_idx = fixed_headers.index("下载链接") + 1
+
+        def _write_sheet(ws, sheet_rows, field_names):
+            # 只保留有数据的字段列
+            cols_with_data = {
+                name for r in sheet_rows
+                for name, val in r.extracted_fields.items()
+                if val and name in field_names
+            } if sheet_rows and field_names else set()
+            active_fields = [n for n in field_names if n in cols_with_data] or list(field_names)
+            ws.append(fixed_headers + [f"{n}(AI提取)" for n in active_fields])
+            for e in sheet_rows:
+                link_entry_id = e.duplicate_of_id if (e.is_duplicate and e.duplicate_of_id) else e.id
+                has_file = bool(e.saved_filename) or bool(e.is_duplicate and e.duplicate_of_id)
+                link = url_for("download_attachment", entry_id=link_entry_id, _external=True) if has_file else ""
+                note = "重复（内容与另一封邮件相同，已保留发送时间更晚的那份）" if e.is_duplicate else ""
+                ws.append(
+                    [e.sender_name or "", e.sender_email or "", e.subject or "",
+                     e.original_filename or "", link, note]
+                    + [e.extracted_fields.get(n) or "" for n in active_fields]
+                )
+                if link:
+                    cell = ws.cell(row=ws.max_row, column=link_col_idx)
+                    cell.hyperlink = link
+                    cell.style = "Hyperlink"
+            for i, w in enumerate(fixed_widths + [18] * len(active_fields), start=1):
+                ws.column_dimensions[get_column_letter(i)].width = w
+
+        def _safe_title(name, idx):
+            safe = _re.sub(r'[\\/?*\[\]:]', '_', name)
+            return (safe[:28] + f"_{idx}" if len(safe) > 31 else safe) or f"Sheet{idx}"
 
         wb = Workbook()
-        ws = wb.active
-        ws.title = "处理记录"
-        ws.append(headers)
-        for e in rows:
-            link_entry_id = e.duplicate_of_id if (e.is_duplicate and e.duplicate_of_id) else e.id
-            has_file = bool(e.saved_filename) or bool(e.is_duplicate and e.duplicate_of_id)
-            link = url_for("download_attachment", entry_id=link_entry_id, _external=True) if has_file else ""
-            note = "重复（内容与另一封邮件相同，已保留发送时间更晚的那份）" if e.is_duplicate else ""
-            fields = e.extracted_fields
-            ws.append(
-                [
-                    e.sender_name or "",
-                    e.sender_email or "",
-                    e.subject or "",
-                    e.original_filename or "",
-                    link,
-                    note,
-                ]
-                + [fields.get(name) or "" for name in field_names]
-            )
-            if link:
-                cell = ws.cell(row=ws.max_row, column=link_col)
-                cell.hyperlink = link
-                cell.style = "Hyperlink"
+        wb.remove(wb.active)
 
-        fixed_widths = [22, 28, 34, 34, 46, 34]
-        widths = fixed_widths + [18] * len(field_names)
-        for i, width in enumerate(widths, start=1):
-            ws.column_dimensions[get_column_letter(i)].width = width
+        for i, (pattern, pattern_rows) in enumerate(groups.items(), start=1):
+            ws = wb.create_sheet(title=_safe_title(pattern, i))
+            _write_sheet(ws, pattern_rows, pattern_fields[pattern])
+
+        if default_rows:
+            ws = wb.create_sheet(title="默认字段")
+            _write_sheet(ws, default_rows, list(global_field_names))
+
+        if not wb.worksheets:
+            wb.create_sheet(title="处理记录")
 
         buf = io.BytesIO()
         wb.save(buf)
         buf.seek(0)
-
         return send_file(
             buf,
             as_attachment=True,
