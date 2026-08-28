@@ -173,10 +173,11 @@
       <div style="margin-bottom:12px;">
         <a class="btn btn-secondary" href="{{ url_for('export_excel') }}">导出 Excel</a>
       </div>
+      <div class="table-scroll">
       <table>
         <thead>
           <tr id="manifest-header-row">
-            <th>发件人名</th><th>发件人邮箱</th><th>主题</th><th>附件标题</th><th>备注</th>
+            <th>发件人名</th><th>发件人邮箱</th><th class="cell-wrap">主题</th><th>附件标题</th><th>备注</th>
             {% for name in extract_field_names %}<th>{{ name }}</th>{% endfor %}
           </tr>
         </thead>
@@ -206,6 +207,7 @@
           {% endfor %}
         </tbody>
       </table>
+      </div><!-- /.table-scroll -->
 
       <div id="manifest-pagination">
         {% if total_pages and total_pages > 1 %}
@@ -322,7 +324,7 @@
       // 还是旧的，看起来就像"新增的列没生效"——这是导致这个问题的一个真实原因。
       const fieldNames = data.field_names || [];
       manifestHeaderRow.innerHTML =
-        '<th>发件人名</th><th>发件人邮箱</th><th>主题</th><th>附件标题</th><th>备注</th>'
+        '<th>发件人名</th><th>发件人邮箱</th><th class="cell-wrap">主题</th><th>附件标题</th><th>备注</th>'
         + fieldNames.map(n => `<th>${escapeHtml(n)}</th>`).join('');
 
       const fieldCount = fieldNames.length;
