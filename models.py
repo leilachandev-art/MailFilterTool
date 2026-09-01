@@ -52,6 +52,8 @@ class User(db.Model):
     # 独立的开关，跟"字段填了哪些"分开存——关掉这个开关时字段列表还留着（下次重新
     # 打开不用重新敲一遍），只是运行时不会真的调用 AI，省下这部分 API 费用。
     ai_extract_enabled = db.Column(db.Boolean, default=True)
+    # QB Desktop 导入时的全局默认费用科目，供应商预设里没配科目时使用
+    global_qb_account = db.Column(db.String(255), default="Uncategorized Expenses")
 
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
@@ -149,6 +151,7 @@ class VendorFieldPreset(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     match_pattern = db.Column(db.String(255), nullable=False)
     extract_fields = db.Column(db.Text, default="")
+    qb_account = db.Column(db.String(255), default="")  # QB Desktop 费用科目名称
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 

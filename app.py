@@ -88,7 +88,7 @@ def _run_lightweight_migrations():
     """没接 Alembic，db.create_all() 只建新表不加新列。这里自动比对 models.py 和数据库的列，
     缺什么自动 ALTER TABLE 补上，升级字段不用手动删库。"""
     inspector = inspect(db.engine)
-    for model in (User, ProcessedMessage, ManifestEntry, RunLog, RunStatus):
+    for model in (User, ProcessedMessage, ManifestEntry, RunLog, RunStatus, VendorFieldPreset):
         table = model.__table__
         if not inspector.has_table(table.name):
             continue
@@ -141,7 +141,9 @@ def _seed_vendor_presets():
 
 def create_app():
     app = Flask(__name__)
-    app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
+    # 用 `or` 而非 default 参数，避免 .env 里写了 SECRET_KEY=（空值）时
+    # os.environ.get() 返回空字符串而不触发默认值，导致 session cookie 可被伪造。
+    app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
 
     # 反向代理平台（Render 等）处理 https 后转内部 http，加 ProxyFix 才能正确识别原始协议。
     from werkzeug.middleware.proxy_fix import ProxyFix
@@ -287,7 +289,11 @@ def _pick_field_names_for_member(user, sender_raw):
     if all_presets:
         presets_data = [(p.match_pattern, field_config.parse_extract_fields(p.extract_fields)) for p in all_presets]
         for token in [t.strip() for t in (sender_raw or "").split(",") if t.strip()]:
-            chosen = field_config.pick_field_defs_for_sender(token, global_defs, presets_data)
+            # pick_field_defs_for_sender 域名匹配要求 sender_email 含 "@"；
+            # 用户在"发件人包含"里一般填纯域名（如 ascendtms.com），没有 @，
+            # 给纯域名加占位前缀让函数能正确提取域名部分并匹配预设。
+            lookup = token if "@" in token else f"_@{token}"
+            chosen = field_config.pick_field_defs_for_sender(lookup, global_defs, presets_data)
             if chosen is not global_defs:
                 for f in chosen:
                     if f["name"] not in seen:
@@ -417,6 +423,7 @@ def register_routes(app):
                     "id": p.id,
                     "match_pattern": p.match_pattern,
                     "field_defs": field_config.parse_extract_fields(p.extract_fields),
+                    "qb_account": p.qb_account or "",
                 }
                 for p in VendorFieldPreset.query.order_by(VendorFieldPreset.id.asc()).all()
             ] if effective_is_admin else [],
@@ -526,6 +533,7 @@ def register_routes(app):
             field_config.parse_extract_fields(request.form.get("extract_fields", ""))
         )
         user.ai_extract_enabled = bool(request.form.get("ai_extract_enabled"))
+        user.global_qb_account = request.form.get("global_qb_account", "").strip()
 
         commit_with_retry(db.session)
         return _respond("配置已保存。")
@@ -549,6 +557,7 @@ def register_routes(app):
             extract_fields=field_config.serialize_extract_fields(
                 field_config.parse_extract_fields(request.form.get("extract_fields", ""))
             ),
+            qb_account=request.form.get("qb_account", "").strip(),
         )
         db.session.add(preset)
         commit_with_retry(db.session)
@@ -574,6 +583,7 @@ def register_routes(app):
         preset.extract_fields = field_config.serialize_extract_fields(
             field_config.parse_extract_fields(request.form.get("extract_fields", ""))
         )
+        preset.qb_account = request.form.get("qb_account", "").strip()
         commit_with_retry(db.session)
         return _respond("预设已保存。")
 
@@ -643,6 +653,12 @@ def register_routes(app):
 
         folder = os.path.join(DOWNLOADS_ROOT, str(user.id), entry.run_id or "")
         filepath = os.path.join(folder, entry.saved_filename or "")
+        # 路径边界检查：防止 saved_filename 含异常值时跳出 DOWNLOADS_ROOT 目录。
+        # abspath 会展开所有 .. 和符号链接，确保最终路径确实在允许的目录范围内。
+        _downloads_abs = os.path.abspath(DOWNLOADS_ROOT)
+        if not os.path.abspath(filepath).startswith(_downloads_abs + os.sep):
+            flash("附件路径非法，拒绝访问。")
+            return redirect(url_for("dashboard"))
         if not entry.saved_filename or not os.path.isfile(filepath):
             flash("这个附件的文件已经不在服务器上了（临时文件可能已被清理），建议重新运行一次。")
             return redirect(url_for("dashboard"))
@@ -662,6 +678,11 @@ def register_routes(app):
             return redirect(url_for("dashboard"))
 
         folder = os.path.join(DOWNLOADS_ROOT, str(user.id), run_id)
+        # 路径边界检查：run_id 来自 URL 参数，防止含 .. 等路径穿越字符时跳出 DOWNLOADS_ROOT。
+        _downloads_abs = os.path.abspath(DOWNLOADS_ROOT)
+        if not os.path.abspath(folder).startswith(_downloads_abs + os.sep):
+            flash("路径非法，拒绝访问。")
+            return redirect(url_for("dashboard"))
         if not os.path.isdir(folder) or not os.listdir(folder):
             flash("这次运行的文件已经不在服务器上了（临时文件可能已被清理），建议重新运行一次。")
             return redirect(url_for("dashboard"))
@@ -784,6 +805,142 @@ def register_routes(app):
             as_attachment=True,
             download_name="处理记录.xlsx",
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+    @app.route("/export_qb_bills")
+    def export_qb_bills():
+        """导出 QuickBooks Desktop IIF 格式（Bills）。
+        IIF 是 QB Desktop 原生文本导入格式，可通过
+        File → Utilities → Import → IIF Files 直接导入，无需安装任何插件。
+
+        字段映射：
+        - Vendor (NAME)  ← 发件人姓名
+        - Date           ← AI 提取的日期字段，找不到则退回邮件发送日期
+        - Ref No (DOCNUM)← AI 提取的发票号/参考号
+        - Amount         ← AI 提取的金额；TRNS 行写负数（应付），SPL 行写正数（费用）
+        - ACCNT (TRNS)   ← "Accounts Payable"（固定，QB 标准 AP 科目）
+        - ACCNT (SPL)    ← 留空，在 QB 中导入后指定费用科目
+        重复行（is_duplicate=True）自动跳过。"""
+        import re as _re_qb
+        user = current_user()
+        if not user:
+            return redirect(url_for("index"))
+
+        rows = (
+            ManifestEntry.query.filter_by(user_id=user.id)
+            .order_by(ManifestEntry.created_at.desc(), ManifestEntry.id.desc())
+            .all()
+        )
+
+        # 预加载所有供应商预设，用于匹配 QB 费用科目
+        all_presets_db = VendorFieldPreset.query.all()
+        _global_qb_acct = (user.global_qb_account or "").strip() or "Uncategorized Expenses"
+
+        def _qb_account_for(sender_email_str):
+            """按发件人邮箱/域名匹配预设的 QB 科目；无命中则退回全局默认科目。"""
+            email = (sender_email_str or "").strip().lower()
+            domain = email.split("@")[-1] if "@" in email else email
+            exact, domain_match = None, None
+            for p in all_presets_db:
+                pat = (p.match_pattern or "").strip().lower()
+                if not pat:
+                    continue
+                if "@" in pat:
+                    if exact is None and email == pat:
+                        exact = (p.qb_account or "").strip()
+                else:
+                    pat_domain = pat.lstrip("@")
+                    if domain_match is None and domain and domain == pat_domain:
+                        domain_match = (p.qb_account or "").strip()
+            chosen = exact if exact is not None else domain_match
+            return chosen or _global_qb_acct
+
+        def _detect(extracted, *keywords):
+            for key, val in (extracted or {}).items():
+                if val and any(kw in key.lower() for kw in keywords):
+                    return str(val).strip()
+            return ""
+
+        def _parse_date(s):
+            if not s:
+                return ""
+            for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y", "%Y/%m/%d",
+                        "%B %d, %Y", "%b %d, %Y", "%d-%b-%Y", "%d %b %Y"):
+                try:
+                    return datetime.strptime(s.strip(), fmt).strftime("%m/%d/%Y")
+                except ValueError:
+                    continue
+            return s.strip()
+
+        def _epoch_to_date(ms_str):
+            try:
+                return datetime.utcfromtimestamp(int(str(ms_str).strip()) / 1000).strftime("%m/%d/%Y")
+            except (TypeError, ValueError):
+                return ""
+
+        def _clean_amount(s):
+            if not s:
+                return ""
+            return _re_qb.sub(r"[^\d.\-]", "", s)
+
+        T = "\t"
+        lines = []
+        # IIF 文件头：定义 TRNS 和 SPL 各列的顺序
+        lines.append(T.join(["!TRNS", "TRNSTYPE", "DATE", "ACCNT", "NAME",
+                              "AMOUNT", "DOCNUM", "MEMO", "DUEDATE", "TERMS"]))
+        lines.append(T.join(["!SPL",  "TRNSTYPE", "DATE", "ACCNT", "NAME",
+                              "AMOUNT", "DOCNUM", "MEMO"]))
+        lines.append("!ENDTRNS")
+
+        for e in rows:
+            if e.is_duplicate:
+                continue
+
+            extracted = e.extracted_fields or {}
+
+            raw_date  = _detect(extracted, "date", "日期", "invoice date", "bill date", "issued")
+            bill_date = _parse_date(raw_date) or _epoch_to_date(e.mail_date)
+            due_date  = _parse_date(_detect(extracted, "due", "到期", "payment date", "pay by"))
+            ref_no    = _detect(extracted, "ref", "invoice", "bill no", "doc", "reference",
+                                 "number", "no.", "#", "invoice#", "发票号", "参考号")
+            amt_raw   = _clean_amount(_detect(extracted, "total", "amount", "grand",
+                                              "charge", "fee", "金额", "应付"))
+            currency  = _detect(extracted, "currency", "curr", "币种", "ccy")
+
+            try:
+                neg_amt = f"-{float(amt_raw):.2f}" if amt_raw else ""
+                pos_amt = f"{float(amt_raw):.2f}"  if amt_raw else ""
+            except ValueError:
+                neg_amt = amt_raw
+                pos_amt = amt_raw
+
+            memo = e.subject or ""
+            if currency:
+                memo = f"[{currency}] {memo}" if memo else currency
+            description = e.original_filename or memo
+
+            vendor = e.sender_name or ""
+            spl_account = _qb_account_for(e.sender_email)
+
+            # TRNS 行：应付账款（负数，表示公司欠供应商）
+            lines.append(T.join([
+                "TRNS", "BILL", bill_date, "Accounts Payable",
+                vendor, neg_amt, ref_no, memo, due_date, ""
+            ]))
+            # SPL 行：费用分录（正数；ACCNT 取预设科目或全局默认科目）
+            lines.append(T.join([
+                "SPL", "BILL", bill_date, spl_account,
+                "", pos_amt, ref_no, description
+            ]))
+            lines.append("ENDTRNS")
+
+        content = "\r\n".join(lines) + "\r\n"
+        fname = f"QB_Bills_{datetime.utcnow().strftime('%Y%m%d')}.iif"
+        return send_file(
+            io.BytesIO(content.encode("utf-8")),
+            as_attachment=True,
+            download_name=fname,
+            mimetype="text/plain",
         )
 
     @app.route("/stop", methods=["POST"])

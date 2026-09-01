@@ -110,6 +110,12 @@
         </div>
         <input type="hidden" name="extract_fields" id="extract-fields-hidden">
 
+        <div style="margin-top:16px;">
+          <label>QB 默认费用科目</label>
+          <input type="text" name="global_qb_account" value="{{ user.global_qb_account or 'Uncategorized Expenses' }}" placeholder="Uncategorized Expenses" style="max-width:280px;">
+          <p class="hint" style="margin-top:4px;">导出 QB IIF 时，未单独配置科目的供应商使用此科目。必须与 QuickBooks Chart of Accounts 里的名称完全一致。</p>
+        </div>
+
         <div style="margin-top: 18px; display: flex; align-items: center; gap: 10px;">
           <button class="btn" type="submit">保存配置</button>
           <span id="config-autosave-indicator" style="font-size: 13px; color: var(--color-text-faint, #888); opacity: 0; transition: opacity 0.4s;"></span>
@@ -175,6 +181,7 @@
       <div id="manifest-body" style="margin-top:16px;">
       <div style="margin-bottom:12px;">
         <a class="btn btn-secondary" href="{{ url_for('export_excel') }}">导出 Excel</a>
+        <a class="btn btn-secondary" href="{{ url_for('export_qb_bills') }}" style="margin-left:8px;">导出 QB IIF</a>
       </div>
       <div class="table-scroll">
       <table>
@@ -660,11 +667,12 @@
     const addVendorPresetBtn = document.getElementById('add-vendor-preset-btn');
     const initialVendorPresets = {{ vendor_presets | tojson }};
 
-    function vendorPresetFormData(patternValue, fieldDefs) {
+    function vendorPresetFormData(patternValue, fieldDefs, qbAccount) {
       const fd = new FormData();
       fd.append('csrf_token', CSRF_TOKEN);
       fd.append('match_pattern', patternValue);
       fd.append('extract_fields', JSON.stringify(fieldDefs));
+      fd.append('qb_account', qbAccount || '');
       return fd;
     }
 
@@ -784,7 +792,23 @@
       addFieldBtn.style.cssText = 'padding:4px 10px; font-size:11px; margin-top:6px;';
       addFieldBtn.textContent = '+ 添加字段';
 
+      // QB 费用科目输入行
+      const qbRow = document.createElement('div');
+      qbRow.style.cssText = 'display:flex; align-items:center; gap:8px; margin-top:8px;';
+      const qbLabel = document.createElement('label');
+      qbLabel.textContent = 'QB 科目';
+      qbLabel.style.cssText = 'white-space:nowrap; font-size:12px; color:#555; margin:0; min-width:52px;';
+      const qbAccountInput = document.createElement('input');
+      qbAccountInput.type = 'text';
+      qbAccountInput.className = 'vendor-preset-qb-account';
+      qbAccountInput.placeholder = '留空则使用全局默认科目';
+      qbAccountInput.value = preset.qb_account || '';
+      qbAccountInput.style.cssText = 'flex:1; font-size:12px;';
+      qbRow.appendChild(qbLabel);
+      qbRow.appendChild(qbAccountInput);
+
       expandedBody.appendChild(headerRow);
+      expandedBody.appendChild(qbRow);
       expandedBody.appendChild(matchNoticeEl);
       expandedBody.appendChild(fieldsList);
       expandedBody.appendChild(addFieldBtn);
@@ -840,7 +864,7 @@
         return fetch(url, {
           method: 'POST',
           headers: { 'X-Requested-With': 'XMLHttpRequest' },
-          body: vendorPresetFormData(patternValue, fieldDefs),
+          body: vendorPresetFormData(patternValue, fieldDefs, qbAccountInput.value.trim()),
         })
           .then(r => r.text().then(text => ({ status: r.status, ok: r.ok, text })))
           .then(({ status, ok, text }) => {
@@ -915,7 +939,7 @@
         fetch(`/vendor-presets/${presetId}/delete`, {
           method: 'POST',
           headers: { 'X-Requested-With': 'XMLHttpRequest' },
-          body: vendorPresetFormData('', []),
+          body: vendorPresetFormData('', [], ''),
         }).catch(() => {});
       }
 
